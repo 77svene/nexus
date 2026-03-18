@@ -1,243 +1,172 @@
-# Nexus
-### **Your browser, now a programmable API.**
-**The programmable web**
-
-[![GitHub Stars](https://img.shields.io/github/stars/nexus/nexus?style=social)](https://github.com/nexus/nexus)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Discord](https://img.shields.io/discord/123456789?label=Discord&logo=discord)](https://discord.gg/nexus)
-
-**Nexus transforms any website into a controllable API for AI agents with persistent sessions, human-like behavior, and residential proxies.** Built-in plugins handle authentication, data extraction, and complex workflows while a visual dashboard lets you debug and replay actions. Scale effortlessly with distributed browser clusters that evade detection and bypass restrictions.
+# **NEXUS**  
+*The developer-first AI art platform that builds itself around your workflow.*  
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)  
+[![GitHub Stars](https://img.shields.io/github/stars/your-org/nexus.svg?style=social&label=Stars)](https://github.com/your-org/nexus)  
+[![Discord](https://img.shields.io/discord/your-invite-code?label=Discord&logo=discord)](https://discord.gg/your-invite)  
 
 ---
 
-## 🚀 Why Nexus? The Upgrade That Changes Everything
+## **Where creation flows.**
 
-If you're using `browser-use`, you're leaving 80% of your potential on the table. Nexus isn't just an update—it's a complete re-engineering for production-grade automation.
-
-| Feature | browser-use | **Nexus** | Impact |
-|---------|-------------|-----------|---------|
-| **Session Management** | Basic cookies | **Persistent sessions with state persistence across runs** | Never re-login again |
-| **Anti-Detection** | Basic headers | **Advanced fingerprint randomization + human-like behavior patterns** | 99% lower ban rate |
-| **Proxy Support** | Manual setup | **Built-in rotation + residential IP integration** | Geo-targeting made easy |
-| **Debugging** | Console logs | **Visual dashboard with DOM inspection & action replay** | Debug in minutes, not hours |
-| **Workflow Plugins** | None | **Login, form-filling, data extraction plugins** | Skip the boilerplate |
-| **Scaling** | Single browser | **Distributed scraping with headless clusters** | Scale to millions of pages |
+Nexus is a **modern, React-based UI for Stable Diffusion** that replaces the clunky Gradio interface with a real-time collaborative workspace, built-in AI agent integration, and containerized dependency management. It’s the stable-diffusion-webui you know—reimagined for teams, automation, and seamless iteration.
 
 ---
 
-## ⚡ Quickstart: From Zero to API in 60 Seconds
+## **Why Switch from stable-diffusion-webui?**
 
-```python
-from nexus import NexusBrowser
+| Feature | stable-diffusion-webui | **Nexus** |
+|---------|------------------------|-----------|
+| **UI/UX** | Gradio-based, single-user, limited mobile support | **React-based, real-time collaboration, mobile-responsive, workflow builder** |
+| **AI Integration** | Manual prompting, no agent support | **Native AI agents: LLM-driven prompt engineering, auto model selection, multi-step workflows** |
+| **Dependency Management** | Manual CUDA setup, “works on my machine” issues | **Containerized with Docker, automatic CUDA/driver detection, one-click updates** |
+| **Extensibility** | Python scripts, limited API | **Modular plugin system, REST API, WebSocket for real-time control** |
+| **Performance** | Single-process, UI blocks during generation | **Async pipeline, non-blocking UI, progress streaming** |
 
-# Initialize with anti-detection and proxy rotation
-browser = NexusBrowser(
-    persistent_session=True,
-    anti_detection="advanced",
-    proxy="residential"
-)
+---
 
-# Transform any website into an API
-async def scrape_product(url):
-    await browser.goto(url)
-    
-    # Use built-in plugins for complex workflows
-    await browser.plugin("data_extraction").extract({
-        "title": "h1.product-title",
-        "price": ".price",
-        "reviews": [".review-text"]
-    })
-    
-    # Session persists automatically
-    return browser.data
+## **Quickstart**
 
-# Scale with distributed clusters
-from nexus.cluster import BrowserCluster
-
-cluster = BrowserCluster(nodes=10)
-results = await cluster.map(scrape_product, urls)
+```bash
+# Clone and start with Docker (auto-detects CUDA)
+git clone https://github.com/your-org/nexus.git
+cd nexus
+./start.sh  # Installs, detects GPU, and launches in browser
 ```
 
-**What just happened?**
-- ✅ No more cookie management headaches
-- ✅ No more bot detection blocks  
-- ✅ No more proxy configuration nightmares
-- ✅ No more debugging blind
+Or run without Docker (requires Python 3.10+ and Node.js 18+):
+```bash
+pip install -r requirements.txt
+npm run build
+python launch.py --share
+```
+
+Open `http://localhost:7860` and start creating.
 
 ---
 
-## 🏗️ Architecture Overview
+## **Architecture Overview**
 
-```
-┌─────────────────────────────────────────────────────┐
-│                   Nexus Core                        │
-├─────────────┬─────────────┬─────────────────────────┤
-│  Session    │  Anti-      │  Plugin                 │
-│  Manager    │  Detection  │  System                 │
-│  • State    │  • Finger-  │  • Auth                 │
-│  • Cookies  │    printing │  • Data Extract         │
-│  • Storage  │  • Behavior │  • Workflows            │
-├─────────────┴─────────────┴─────────────────────────┤
-│               Visual Debug Dashboard                │
-│  • DOM Inspector • Action Replay • Network Monitor  │
-├─────────────────────────────────────────────────────┤
-│           Distributed Browser Cluster               │
-│  • Load Balancer • Auto-scaling • Fault Tolerance   │
-└─────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    A[React Frontend] -->|WebSocket| B[FastAPI Backend]
+    B --> C[Stable Diffusion Pipeline]
+    B --> D[AI Agent Orchestrator]
+    C --> E[GPU/CUDA Runtime]
+    D --> F[LLM Providers]
+    B --> G[Container Manager]
+    G --> H[Docker/CUDA Auto-detection]
 ```
 
-**Key Components:**
-1. **Persistent Session Engine** - Saves browser state between runs
-2. **Anti-Detection Suite** - Randomizes fingerprints, mimics human behavior
-3. **Plugin Architecture** - Extensible system for common workflows
-4. **Visual Debugger** - See exactly what your automation sees
-5. **Cluster Manager** - Distribute work across multiple browsers
+- **Frontend**: React + TypeScript with real-time collaboration (CRDT-based)
+- **Backend**: FastAPI serving async inference, WebSocket for live updates
+- **AI Agents**: LangChain-based agents for prompt refinement, model routing, and workflow automation
+- **Containerization**: Docker with NVIDIA runtime, automatic CUDA version matching
+- **Storage**: SQLite for metadata, filesystem for models/outputs, optional S3 sync
 
 ---
 
-## 📦 Installation
+## **Installation**
 
 ### Prerequisites
-- Python 3.9+
-- Node.js 18+ (for dashboard)
+- Docker 20.10+ (recommended) **OR** Python 3.10+, Node.js 18+
+- NVIDIA GPU with CUDA 11.7+ (AMD/Intel support via DirectML in beta)
 
-### Quick Install
+### Option 1: Docker (Recommended)
 ```bash
-# Install nexus
-pip install nexus-automation
-
-# Install dashboard (optional but recommended)
-npm install -g @nexus/dashboard
-
-# Initialize your first project
-nexus init my-project
-cd my-project
+# Auto-detects GPU and installs correct CUDA image
+curl -fsSL https://get.nexus.dev | bash
+nexus start
 ```
 
-### Docker (Production)
+### Option 2: Manual Install
 ```bash
-docker pull nexus/nexus:latest
-docker run -p 8080:80 -p 3000:3000 nexus/nexus
+git clone https://github.com/your-org/nexus.git
+cd nexus
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+python launch.py --listen --port 7860
 ```
+
+### Option 3: One-Click Cloud Deploy
+[![Deploy to Runway](https://img.shields.io/badge/Runway-Deploy%20Now-blue?logo=data:image/png;base64,...)](https://app.runwayml.com/clone/nexus)  
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/your-org/nexus/blob/main/colab/nexus.ipynb)
 
 ---
 
-## 🎯 Migration from browser-use
+## **Key Features**
 
-Switching takes 5 minutes:
+### 🚀 **Modern UI & Real-Time Collaboration**
+- Multi-user sessions with live cursors and shared galleries
+- Drag-and-drop workflow builder for complex pipelines
+- Mobile-responsive design for generation on the go
 
+### 🤖 **AI Agent Integration**
 ```python
-# OLD: browser-use
-from browser_use import Browser
-browser = Browser()
-
-# NEW: Nexus (almost identical, infinitely more powerful)
-from nexus import NexusBrowser
-browser = NexusBrowser()  # That's it. You're upgraded.
-
-# Your existing code works, but now with superpowers
+# Example: Use an LLM to refine prompts automatically
+from nexus.agents import PromptEngineer
+agent = PromptEngineer(model="gpt-4")
+enhanced_prompt = agent.refine("a cat sitting on a rainbow")
 ```
+- Automatic model selection based on style keywords
+- Multi-step workflows: “Upscale → Face Fix → Color Grade”
 
-**Migration Benefits:**
-- 🔄 **Drop-in replacement** - Same API, more features
-- 📈 **10x reliability** - Sessions survive crashes
-- 🛡️ **Enterprise-grade** - Anti-detection built-in
-- 📊 **Visibility** - Debug with visual dashboard
+### 📦 **Containerized & Hassle-Free**
+- Automatic CUDA detection (supports 11.7, 12.1, 12.4)
+- One-click updates: `nexus update --safe`
+- Portable across Windows/Linux/macOS (macOS via CPU/Metal)
 
----
-
-## 🌟 Real-World Examples
-
-### Example 1: E-commerce Monitoring
-```python
-# Monitor prices across 1000 products
-browser = NexusBrowser(proxy="residential")
-cluster = BrowserCluster(nodes=50)
-
-async def check_price(product_url):
-    await browser.goto(product_url)
-    price = await browser.plugin("data_extraction").extract(".price")
-    if price < threshold:
-        await browser.plugin("notifications").send_alert(f"Price drop: {price}")
-
-await cluster.map(check_price, product_urls)
-```
-
-### Example 2: Social Media Automation
-```python
-# Human-like social media interactions
-browser = NexusBrowser(
-    anti_detection="advanced",
-    behavior_profile="casual_user"
-)
-
-await browser.goto("https://twitter.com")
-await browser.plugin("auth").login(credentials)
-await browser.plugin("social").like_posts(count=10)
-await browser.plugin("social").follow_users(count=5)
-```
+### ⚡ **Performance Optimized**
+- Async inference queue (non-blocking UI)
+- Model caching and smart VRAM management
+- Support for SDXL, SD 1.5, LoRA, ControlNet out of the box
 
 ---
 
-## 📊 Benchmarks
+## **Migration from stable-diffusion-webui**
 
-| Metric | browser-use | Nexus | Improvement |
-|--------|-------------|-------|-------------|
-| Success Rate | 65% | 99.2% | **+52%** |
-| Avg. Response Time | 2.1s | 1.4s | **-33%** |
-| Detection Rate | 35% | 0.8% | **-98%** |
-| Memory Usage | 450MB | 220MB | **-51%** |
-
-*Benchmarked on 10,000 requests to major e-commerce sites*
+1. **Models & Outputs**: Nexus auto-imports from existing `stable-diffusion-webui/models` and `outputs` folders.
+2. **Extensions**: Compatible with most SD webui extensions via adapter layer.
+3. **Settings**: Run `nexus migrate --from=automatic1111` to copy configurations.
 
 ---
 
-## 🛣️ Roadmap
-
-- **Q4 2024**: Mobile browser support (iOS/Android)
-- **Q1 2025**: AI-powered selector generation
-- **Q2 2025**: Browser-as-a-Service platform
-- **Q3 2025**: Enterprise compliance suite (GDPR, CCPA)
+## **Roadmap**
+- [ ] Real-time video generation (AnimateDiff + streaming)
+- [ ] Team permissions and asset management
+- [ ] Built-in model training (LoRA/Dreambooth) with UI
+- [ ] API gateway for SaaS integration
 
 ---
 
-## 🤝 Contributing
-
-We're building the future of web automation. Join us.
-
-1. **Star the repo** - Help us reach 100k stars
-2. **Join Discord** - Get early access to features
-3. **Submit PRs** - We're actively merging
-4. **Write plugins** - Extend the ecosystem
+## **Contributing**
+We welcome PRs! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ```bash
 # Development setup
-git clone https://github.com/nexus/nexus
+git clone https://github.com/your-org/nexus.git
 cd nexus
-pip install -e ".[dev]"
-pytest tests/
+./start.sh --dev  # Runs with hot-reload
 ```
 
 ---
 
-## 📄 License
-
-Nexus is [MIT licensed](LICENSE). Use it anywhere, for anything.
-
----
-
-## 🆘 Support
-
-- **Documentation**: [docs.nexus.dev](https://docs.nexus.dev)
-- **Discord**: [Join 10k+ developers](https://discord.gg/nexus)
-- **GitHub Issues**: [Report bugs](https://github.com/nexus/nexus/issues)
-- **Enterprise**: [Contact sales](mailto:sales@nexus.dev)
+## **Community & Support**
+- [Discord](https://discord.gg/your-invite) - 24/7 community help
+- [GitHub Discussions](https://github.com/your-org/nexus/discussions) - Feature requests
+- [Twitter](https://twitter.com/nexus_dev) - Updates and tips
 
 ---
 
-**The web was meant to be programmable. Nexus makes it so.**
+## **License**
+Nexus is [MIT licensed](LICENSE).  
+*Stable Diffusion models are subject to their respective licenses.*
 
-[![Get Started](https://img.shields.io/badge/Get_Started-Now-blue?style=for-the-badge)](https://docs.nexus.dev/quickstart)
-[![Join Discord](https://img.shields.io/badge/Join_Discord-10k+_Members-purple?style=for-the-badge)](https://discord.gg/nexus)
+---
 
-*Built with ❤️ by the Nexus team. Forked from browser-use, evolved for the future.*
+**Star the repo** if you believe AI art tools should be developer-first.  
+⭐ **[GitHub](https://github.com/your-org/nexus)** | 🚀 **[Quickstart](#quickstart)** | 🤖 **[Agent Docs](https://docs.nexus.dev/agents)**
+
+---
+
+*Built with ❤️ by engineers who were tired of fighting Gradio.*

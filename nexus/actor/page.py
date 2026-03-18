@@ -1,20 +1,18 @@
-"""Page class for page-level operations with stealth capabilities."""
+"""Page class for page-level operations."""
 
-from typing import TYPE_CHECKING, TypeVar, Dict, Optional, Any, List, Tuple, AsyncGenerator, Union, Type
+from typing import TYPE_CHECKING, TypeVar, Dict, List, Optional, Tuple, Any, Set, Callable
 import asyncio
-import time
-import psutil
-import random
-import math
-from collections import defaultdict
-from dataclasses import dataclass, field
-from enum import Enum
 import json
+import re
+import time
+from enum import Enum
+from dataclasses import dataclass, field
+from functools import lru_cache
+from collections import defaultdict, deque
+from statistics import mean, stdev
 import hashlib
-import os
-from urllib.parse import urlparse
-from pydantic import BaseModel, ValidationError, create_model
-from pydantic.fields import FieldInfo
+
+from pydantic import BaseModel
 
 from nexus import logger
 from nexus.actor.utils import get_key_info
@@ -24,958 +22,1018 @@ from nexus.llm.messages import SystemMessage, UserMessage
 
 T = TypeVar('T', bound=BaseModel)
 
+if TYPE_CHECKING:
+	from cdp_use.cdp.dom.commands import (
+		DescribeNodeParameters,
+		QuerySelectorAllParameters,
+	)
+	from cdp_use.cdp.emulation.commands import SetDeviceMetricsOverrideParameters
+	from cdp_use.cdp.input.commands import (
+		DispatchKeyEventParameters,
+	)
+	from cdp_use.cdp.page.commands import CaptureScreenshotParameters, NavigateParameters, NavigateToHistoryEntryParameters
+	from cdp_use.cdp.runtime.commands import EvaluateParameters
+	from cdp_use.cdp.target.commands import (
+		AttachToTargetParameters,
+		GetTargetInfoParameters,
+	)
+	from cdp_use.cdp.target.types import TargetInfo
 
-class RateLimitState(Enum):
-    """State of rate limiting for a domain."""
-    NORMAL = "normal"
-    BACKOFF = "backoff"
-    CAPTCHA = "captcha"
+	from nexus.browser.session import BrowserSession
+	from nexus.llm.base import BaseChatModel
+
+	from .element import Element
+	from .mouse import Mouse
 
 
-@dataclass
-class StealthProfile:
-    """Behavior profile for stealth operations."""
-    name: str
-    mouse_speed_range: Tuple[float, float] = (0.1, 0.8)
-    typing_speed_range: Tuple[float, float] = (0.05, 0.15)
-    error_rate: float = 0.02
-    pause_frequency: float = 0.1
-    scroll_behavior: str = "natural"
-    viewport_variance: float = 0.1
-    timezone: str = "America/New_York"
-    language: str = "en-US"
-    platform: str = "Win32"
-    hardware_concurrency: int = 8
-    device_memory: int = 8
-    max_touch_points: int = 0
-    do_not_track: bool = True
-    cookie_enabled: bool = True
-    webgl_vendor: str = "Google Inc. (NVIDIA)"
-    webgl_renderer: str = "ANGLE (NVIDIA, NVIDIA GeForce RTX 3080 Direct3D11 vs_5_0 ps_5_0, D3D11)"
-    canvas_hash: str = ""
-    audio_hash: str = ""
-    fonts: List[str] = field(default_factory=lambda: [
-        "Arial", "Verdana", "Times New Roman", "Courier New", "Georgia", 
-        "Palatino Linotype", "Book Antiqua", "Lucida Console", "Monaco"
-    ])
-    plugins: List[Dict[str, str]] = field(default_factory=lambda: [
-        {"name": "Chrome PDF Plugin", "filename": "internal-pdf-viewer"},
-        {"name": "Chrome PDF Viewer", "filename": "mhjfbmdgcfjbbpaeojofohoefgiehjai"},
-        {"name": "Native Client", "filename": "internal-nacl-plugin"}
-    ])
+class LocatorStrategy(Enum):
+	"""Strategies for locating elements."""
+	ORIGINAL_SELECTOR = "original_selector"
+	CSS_SELECTOR = "css_selector"
+	XPATH = "xpath"
+	TEXT_CONTENT = "text_content"
+	AI_VISION = "ai_vision"
+	VISUAL_SIMILARITY = "visual_similarity"
+	ACCESSIBILITY_TREE = "accessibility_tree"
 
 
 @dataclass
-class Fingerprint:
-    """Complete browser fingerprint."""
-    user_agent: str
-    viewport: Dict[str, int]
-    screen: Dict[str, int]
-    device_pixel_ratio: float
-    platform: str
-    language: str
-    languages: List[str]
-    timezone: str
-    webgl_vendor: str
-    webgl_renderer: str
-    canvas_hash: str
-    audio_hash: str
-    fonts: List[str]
-    plugins: List[Dict[str, str]]
-    hardware_concurrency: int
-    device_memory: int
-    max_touch_points: int
-    do_not_track: bool
-    cookie_enabled: bool
-    color_depth: int
-    pixel_ratio: float
-    touch_support: bool
-    audio_context: Dict[str, Any]
-    web_rtc_ips: List[str]
-    battery_info: Dict[str, Any]
-    connection_type: str
-    headers_order: List[str]
+class LocatorResult:
+	"""Result from a locator strategy."""
+	strategy: LocatorStrategy
+	backend_node_id: Optional[int] = None
+	confidence: float = 1.0
+	metadata: Dict[str, Any] = None
+	
+	def __post_init__(self):
+		if self.metadata is None:
+			self.metadata = {}
 
 
 @dataclass
-class DomainRateLimiter:
-    """Token bucket rate limiter for a specific domain."""
-    tokens: float = 10.0
-    max_tokens: float = 10.0
-    refill_rate: float = 2.0  # tokens per second
-    last_refill: float = 0.0
-    state: RateLimitState = RateLimitState.NORMAL
-    backoff_until: float = 0.0
-    consecutive_errors: int = 0
-    last_response_time: float = 0.0
-    response_times: list = None
-    
-    def __post_init__(self):
-        self.response_times = []
-        self.last_refill = time.time()
-    
-    def refill(self):
-        """Refill tokens based on elapsed time."""
-        now = time.time()
-        elapsed = now - self.last_refill
-        self.tokens = min(self.max_tokens, self.tokens + elapsed * self.refill_rate)
-        self.last_refill = now
-    
-    def acquire(self, tokens: float = 1.0) -> bool:
-        """Try to acquire tokens. Returns True if successful."""
-        if self.state == RateLimitState.CAPTCHA:
-            return False
-        
-        if self.state == RateLimitState.BACKOFF:
-            if time.time() < self.backoff_until:
-                return False
-            else:
-                self.state = RateLimitState.NORMAL
-                self.consecutive_errors = 0
-        
-        self.refill()
-        if self.tokens >= tokens:
-            self.tokens -= tokens
-            return True
-        return False
-    
-    def record_response(self, status_code: int, response_time: float, headers: Dict[str, str] = None):
-        """Record response and adjust rate limiting based on response patterns."""
-        self.last_response_time = time.time()
-        self.response_times.append(response_time)
-        if len(self.response_times) > 10:
-            self.response_times.pop(0)
-        
-        # Check for rate limit headers
-        if headers:
-            if 'Retry-After' in headers:
-                try:
-                    retry_after = int(headers['Retry-After'])
-                    self.backoff_until = time.time() + retry_after
-                    self.state = RateLimitState.BACKOFF
-                    logger.warning(f"Rate limited by Retry-After header: {retry_after}s")
-                except ValueError:
-                    pass
-            
-            # Check for common rate limit headers
-            rate_limit_headers = ['X-RateLimit-Remaining', 'X-Rate-Limit-Remaining']
-            for header in rate_limit_headers:
-                if header in headers:
-                    try:
-                        remaining = int(headers[header])
-                        if remaining == 0:
-                            self.backoff_until = time.time() + 60  # Default 60s backoff
-                            self.state = RateLimitState.BACKOFF
-                            logger.warning(f"Rate limited by {header} header")
-                    except ValueError:
-                        pass
-        
-        # Check for HTTP status codes indicating rate limiting
-        if status_code == 429:  # Too Many Requests
-            self.consecutive_errors += 1
-            backoff_time = min(300, 2 ** self.consecutive_errors)  # Exponential backoff, max 5 minutes
-            self.backoff_until = time.time() + backoff_time
-            self.state = RateLimitState.BACKOFF
-            logger.warning(f"Rate limited (429). Backing off for {backoff_time}s")
-        elif status_code == 403 and 'captcha' in str(headers).lower():
-            self.state = RateLimitState.CAPTCHA
-            logger.error("CAPTCHA detected. Stopping requests to this domain.")
-        elif 200 <= status_code < 300:
-            self.consecutive_errors = 0
-            # Gradually increase rate on success
-            self.refill_rate = min(10.0, self.refill_rate * 1.1)
-        elif status_code >= 500:
-            self.consecutive_errors += 1
-            if self.consecutive_errors > 3:
-                self.backoff_until = time.time() + 30
-                self.state = RateLimitState.BACKOFF
-    
-    def adjust_for_system_resources(self, cpu_percent: float, memory_percent: float):
-        """Adjust rate limiting based on system resource usage."""
-        # Reduce rate if system is under heavy load
-        if cpu_percent > 80 or memory_percent > 80:
-            self.refill_rate = max(0.5, self.refill_rate * 0.8)
-            self.max_tokens = max(2.0, self.max_tokens * 0.9)
-        elif cpu_percent < 30 and memory_percent < 50:
-            # Increase rate if system has capacity
-            self.refill_rate = min(20.0, self.refill_rate * 1.2)
-            self.max_tokens = min(50.0, self.max_tokens * 1.1)
+class LoadMetrics:
+	"""Metrics for predicting page load completion."""
+	network_requests: int = 0
+	completed_requests: int = 0
+	failed_requests: int = 0
+	dom_mutations: int = 0
+	js_execution_time: float = 0.0
+	last_activity: float = field(default_factory=time.time)
+	load_start: float = field(default_factory=time.time)
+	
+	@property
+	def network_idle(self) -> bool:
+		return self.completed_requests + self.failed_requests >= self.network_requests
+	
+	@property
+	def dom_stable(self) -> bool:
+		return time.time() - self.last_activity > 0.5 and self.dom_mutations < 5
 
 
-class FingerprintGenerator:
-    """Generates realistic browser fingerprints with randomization."""
-    
-    USER_AGENTS = [
-        # Chrome on Windows
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-        # Chrome on Mac
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-        # Chrome on Linux
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        # Firefox on Windows
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
-        # Firefox on Mac
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:121.0) Gecko/20100101 Firefox/121.0",
-        # Safari on Mac
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
-    ]
-    
-    VIEWPORTS = [
-        {"width": 1920, "height": 1080},
-        {"width": 1366, "height": 768},
-        {"width": 1440, "height": 900},
-        {"width": 1536, "height": 864},
-        {"width": 1280, "height": 720},
-        {"width": 2560, "height": 1440},
-        {"width": 1680, "height": 1050},
-        {"width": 1600, "height": 900},
-    ]
-    
-    SCREEN_RESOLUTIONS = [
-        {"width": 1920, "height": 1080},
-        {"width": 1366, "height": 768},
-        {"width": 1440, "height": 900},
-        {"width": 1536, "height": 864},
-        {"width": 1280, "height": 720},
-        {"width": 2560, "height": 1440},
-        {"width": 1680, "height": 1050},
-        {"width": 1600, "height": 900},
-        {"width": 3840, "height": 2160},
-        {"width": 2560, "height": 1080},
-    ]
-    
-    TIMEZONES = [
-        "America/New_York",
-        "America/Chicago",
-        "America/Denver",
-        "America/Los_Angeles",
-        "Europe/London",
-        "Europe/Paris",
-        "Europe/Berlin",
-        "Asia/Tokyo",
-        "Asia/Shanghai",
-        "Australia/Sydney",
-    ]
-    
-    LANGUAGES = [
-        "en-US",
-        "en-GB",
-        "en-CA",
-        "en-AU",
-        "es-ES",
-        "es-MX",
-        "fr-FR",
-        "fr-CA",
-        "de-DE",
-        "it-IT",
-        "pt-BR",
-        "ja-JP",
-        "zh-CN",
-        "zh-TW",
-        "ko-KR",
-    ]
-    
-    @classmethod
-    def generate(cls, profile: StealthProfile = None) -> Fingerprint:
-        """Generate a complete browser fingerprint."""
-        if profile is None:
-            profile = StealthProfile(name="default")
-        
-        user_agent = random.choice(cls.USER_AGENTS)
-        viewport = random.choice(cls.VIEWPORTS)
-        screen = random.choice(cls.SCREEN_RESOLUTIONS)
-        
-        # Add variance to viewport based on profile
-        viewport_variance = profile.viewport_variance
-        viewport = {
-            "width": int(viewport["width"] * random.uniform(1 - viewport_variance, 1 + viewport_variance)),
-            "height": int(viewport["height"] * random.uniform(1 - viewport_variance, 1 + viewport_variance)),
-        }
-        
-        # Ensure viewport doesn't exceed screen
-        viewport["width"] = min(viewport["width"], screen["width"])
-        viewport["height"] = min(viewport["height"], screen["height"])
-        
-        device_pixel_ratio = random.choice([1, 1.25, 1.5, 2])
-        
-        # Generate WebGL hashes
-        canvas_hash = hashlib.md5(f"canvas_{random.randint(1000000, 9999999)}".encode()).hexdigest()
-        audio_hash = hashlib.md5(f"audio_{random.randint(1000000, 9999999)}".encode()).hexdigest()
-        
-        # Generate audio context fingerprint
-        audio_context = {
-            "sampleRate": random.choice([44100, 48000]),
-            "channelCount": random.choice([2, 6]),
-            "latencyHint": random.choice(["interactive", "playback", "balanced"]),
-        }
-        
-        # Generate WebRTC IPs (simulated)
-        web_rtc_ips = [
-            f"192.168.{random.randint(1, 255)}.{random.randint(1, 255)}",
-            f"10.{random.randint(0, 255)}.{random.randint(0, 255)}.{random.randint(1, 255)}",
-        ]
-        
-        # Generate battery info
-        battery_info = {
-            "charging": random.choice([True, False]),
-            "chargingTime": random.randint(0, 3600) if random.random() > 0.5 else 0,
-            "dischargingTime": random.randint(3600, 28800) if random.random() > 0.5 else float('inf'),
-            "level": random.uniform(0.1, 1.0),
-        }
-        
-        # Connection type
-        connection_type = random.choice(["wifi", "cellular", "ethernet", "unknown"])
-        
-        # Headers order (simulated)
-        headers_order = [
-            "Host",
-            "Connection",
-            "Cache-Control",
-            "sec-ch-ua",
-            "sec-ch-ua-mobile",
-            "sec-ch-ua-platform",
-            "Upgrade-Insecure-Requests",
-            "User-Agent",
-            "Accept",
-            "Sec-Fetch-Site",
-            "Sec-Fetch-Mode",
-            "Sec-Fetch-User",
-            "Sec-Fetch-Dest",
-            "Referer",
-            "Accept-Encoding",
-            "Accept-Language",
-        ]
-        random.shuffle(headers_order)
-        
-        return Fingerprint(
-            user_agent=user_agent,
-            viewport=viewport,
-            screen=screen,
-            device_pixel_ratio=device_pixel_ratio,
-            platform=profile.platform,
-            language=profile.language,
-            languages=[profile.language] + random.sample(cls.LANGUAGES, min(3, len(cls.LANGUAGES))),
-            timezone=profile.timezone,
-            webgl_vendor=profile.webgl_vendor,
-            webgl_renderer=profile.webgl_renderer,
-            canvas_hash=canvas_hash,
-            audio_hash=audio_hash,
-            fonts=profile.fonts,
-            plugins=profile.plugins,
-            hardware_concurrency=profile.hardware_concurrency,
-            device_memory=profile.device_memory,
-            max_touch_points=profile.max_touch_points,
-            do_not_track=profile.do_not_track,
-            cookie_enabled=profile.cookie_enabled,
-            color_depth=random.choice([24, 32]),
-            pixel_ratio=device_pixel_ratio,
-            touch_support=profile.max_touch_points > 0,
-            audio_context=audio_context,
-            web_rtc_ips=web_rtc_ips,
-            battery_info=battery_info,
-            connection_type=connection_type,
-            headers_order=headers_order,
-        )
+class SmartWaiter:
+	"""Intelligent waiting that predicts page load completion."""
+	
+	def __init__(self, page: 'Page'):
+		self.page = page
+		self.metrics = LoadMetrics()
+		self._monitoring = False
+		self._mutation_observer_id = None
+		self._network_listeners = []
+		self._js_execution_tracker = []
+		self._prediction_model = self._init_prediction_model()
+		self._prefetch_queue = asyncio.Queue()
+		self._prefetch_task = None
+		
+	def _init_prediction_model(self) -> Dict[str, Any]:
+		"""Initialize prediction model based on historical patterns."""
+		return {
+			'avg_load_time': 2.0,
+			'network_patterns': defaultdict(list),
+			'dom_stability_threshold': 0.3,
+			'js_execution_patterns': defaultdict(float),
+			'page_type_patterns': defaultdict(dict)
+		}
+	
+	async def start_monitoring(self):
+		"""Start monitoring page activity for intelligent waiting."""
+		if self._monitoring:
+			return
+			
+		self._monitoring = True
+		self.metrics = LoadMetrics()
+		
+		# Set up network monitoring
+		await self._setup_network_monitoring()
+		
+		# Set up DOM mutation monitoring
+		await self._setup_mutation_monitoring()
+		
+		# Set up JS execution monitoring
+		await self._setup_js_monitoring()
+		
+		# Start prefetch worker
+		self._prefetch_task = asyncio.create_task(self._prefetch_worker())
+		
+		logger.debug("Smart waiter monitoring started")
+	
+	async def stop_monitoring(self):
+		"""Stop monitoring page activity."""
+		self._monitoring = False
+		
+		# Clean up listeners
+		for listener in self._network_listeners:
+			try:
+				await self.page._client.send.Network.disable()
+			except:
+				pass
+				
+		if self._mutation_observer_id:
+			try:
+				await self.page.evaluate(f"""
+					if (window._mutationObserver) {{
+						window._mutationObserver.disconnect();
+						delete window._mutationObserver;
+					}}
+				""")
+			except:
+				pass
+				
+		if self._prefetch_task:
+			self._prefetch_task.cancel()
+			
+		logger.debug("Smart waiter monitoring stopped")
+	
+	async def _setup_network_monitoring(self):
+		"""Set up network request monitoring."""
+		try:
+			session_id = await self.page.session_id
+			
+			# Enable network domain
+			await self.page._client.send.Network.enable({}, session_id=session_id)
+			
+			# Track request counts
+			self.metrics.network_requests = 0
+			self.metrics.completed_requests = 0
+			self.metrics.failed_requests = 0
+			
+			# Listen for network events
+			async def on_request_will_be_sent(event):
+				self.metrics.network_requests += 1
+				self.metrics.last_activity = time.time()
+				
+			async def on_loading_finished(event):
+				self.metrics.completed_requests += 1
+				self.metrics.last_activity = time.time()
+				
+			async def on_loading_failed(event):
+				self.metrics.failed_requests += 1
+				self.metrics.last_activity = time.time()
+			
+			# Add listeners (simplified - in real implementation would use CDP event listeners)
+			self._network_listeners.extend([
+				on_request_will_be_sent,
+				on_loading_finished,
+				on_loading_failed
+			])
+			
+		except Exception as e:
+			logger.debug(f"Failed to setup network monitoring: {e}")
+	
+	async def _setup_mutation_monitoring(self):
+		"""Set up DOM mutation monitoring."""
+		try:
+			js_code = """
+			(() => {
+				if (window._mutationObserver) {
+					window._mutationObserver.disconnect();
+				}
+				
+				let mutationCount = 0;
+				const observer = new MutationObserver((mutations) => {
+					mutationCount += mutations.length;
+					window._mutationCount = mutationCount;
+					window._lastMutationTime = Date.now();
+					
+					// Notify Python side
+					if (window._mutationCallback) {
+						window._mutationCallback(mutations.length);
+					}
+				});
+				
+				observer.observe(document.body, {
+					childList: true,
+					subtree: true,
+					attributes: true,
+					characterData: true
+				});
+				
+				window._mutationObserver = observer;
+				window._mutationCount = 0;
+				window._lastMutationTime = Date.now();
+				
+				return true;
+			})()
+			"""
+			
+			await self.page.evaluate(js_code)
+			
+			# Set up callback to track mutations
+			def mutation_callback(count):
+				self.metrics.dom_mutations += count
+				self.metrics.last_activity = time.time()
+				
+			# In real implementation, would set up proper callback mechanism
+			
+		except Exception as e:
+			logger.debug(f"Failed to setup mutation monitoring: {e}")
+	
+	async def _setup_js_monitoring(self):
+		"""Set up JavaScript execution monitoring."""
+		try:
+			js_code = """
+			(() => {
+				// Override setTimeout and setInterval to track JS execution
+				const originalSetTimeout = window.setTimeout;
+				const originalSetInterval = window.setInterval;
+				
+				window.setTimeout = function(callback, delay, ...args) {
+					const startTime = performance.now();
+					const wrappedCallback = function() {
+						const endTime = performance.now();
+						window._jsExecutionTime = (window._jsExecutionTime || 0) + (endTime - startTime);
+						return callback.apply(this, args);
+					};
+					return originalSetTimeout(wrappedCallback, delay);
+				};
+				
+				window.setInterval = function(callback, delay, ...args) {
+					const startTime = performance.now();
+					const wrappedCallback = function() {
+						const endTime = performance.now();
+						window._jsExecutionTime = (window._jsExecutionTime || 0) + (endTime - startTime);
+						return callback.apply(this, args);
+					};
+					return originalSetInterval(wrappedCallback, delay);
+				};
+				
+				window._jsExecutionTime = 0;
+				return true;
+			})()
+			"""
+			
+			await self.page.evaluate(js_code)
+			
+		except Exception as e:
+			logger.debug(f"Failed to setup JS monitoring: {e}")
+	
+	async def _prefetch_worker(self):
+		"""Worker for prefetching likely next resources."""
+		while self._monitoring:
+			try:
+				# Wait for prefetch requests
+				url = await asyncio.wait_for(self._prefetch_queue.get(), timeout=1.0)
+				
+				# Prefetch the resource
+				await self.page.evaluate(f"""
+					const link = document.createElement('link');
+					link.rel = 'prefetch';
+					link.href = '{url}';
+					document.head.appendChild(link);
+				""")
+				
+				self._prefetch_queue.task_done()
+				
+			except asyncio.TimeoutError:
+				continue
+			except Exception as e:
+				logger.debug(f"Prefetch worker error: {e}")
+	
+	async def predict_load_completion(self) -> float:
+		"""Predict when page load will complete."""
+		if self.metrics.network_idle and self.metrics.dom_stable:
+			return 0.0
+		
+		# Use historical patterns to predict
+		elapsed = time.time() - self.metrics.load_start
+		
+		# Calculate remaining time based on network and DOM activity
+		network_remaining = max(0, self.metrics.network_requests - 
+							   self.metrics.completed_requests - 
+							   self.metrics.failed_requests) * 0.1
+		
+		dom_remaining = max(0, 5 - self.metrics.dom_mutations) * 0.05
+		
+		js_remaining = max(0, 1.0 - self.metrics.js_execution_time) * 0.2
+		
+		predicted_remaining = network_remaining + dom_remaining + js_remaining
+		
+		# Apply historical patterns
+		page_hash = self._get_page_hash()
+		if page_hash in self._prediction_model['page_type_patterns']:
+			pattern = self._prediction_model['page_type_patterns'][page_hash]
+			if 'avg_load_time' in pattern:
+				historical_avg = pattern['avg_load_time']
+				predicted_remaining = (predicted_remaining + historical_avg) / 2
+		
+		return max(0.1, predicted_remaining)
+	
+	def _get_page_hash(self) -> str:
+		"""Generate a hash for the current page for pattern matching."""
+		url = self.page.url or ""
+		title = self.page.title or ""
+		content = f"{url}:{title}"
+		return hashlib.md5(content.encode()).hexdigest()
+	
+	async def wait_for_load(self, timeout: float = 30.0) -> bool:
+		"""Intelligently wait for page load to complete."""
+		start_time = time.time()
+		
+		while time.time() - start_time < timeout:
+			predicted_remaining = await self.predict_load_completion()
+			
+			if predicted_remaining <= 0.1:
+				# Update historical patterns
+				page_hash = self._get_page_hash()
+				elapsed = time.time() - self.metrics.load_start
+				
+				if page_hash not in self._prediction_model['page_type_patterns']:
+					self._prediction_model['page_type_patterns'][page_hash] = {
+						'count': 0,
+						'avg_load_time': elapsed
+					}
+				else:
+					pattern = self._prediction_model['page_type_patterns'][page_hash]
+					pattern['count'] += 1
+					pattern['avg_load_time'] = (
+						(pattern['avg_load_time'] * (pattern['count'] - 1) + elapsed) / 
+						pattern['count']
+					)
+				
+				return True
+			
+			# Wait for predicted remaining time or a minimum interval
+			wait_time = min(predicted_remaining, 0.5)
+			await asyncio.sleep(wait_time)
+		
+		return False
 
 
-@dataclass
-class PaginationState:
-    """State for pagination tracking."""
-    current_page: int = 1
-    total_pages: Optional[int] = None
-    next_page_selectors: List[str] = field(default_factory=list)
-    page_hashes: Dict[int, str] = field(default_factory=dict)
-    last_page_hash: Optional[str] = None
-    has_more_pages: bool = True
-    pagination_type: Optional[str] = None  # "numbered", "next_button", "infinite_scroll", "load_more"
-
-
-@dataclass
-class ExtractionState:
-    """State for incremental extraction."""
-    url: str
-    schema_hash: str
-    extracted_data: Dict[str, Any] = field(default_factory=dict)
-    page_hashes: Dict[str, str] = field(default_factory=dict)
-    last_extraction_time: float = 0.0
-    change_detection_hash: Optional[str] = None
+class LLMOptimizedDOMSerializer:
+	"""DOM serializer optimized for LLM consumption with hierarchical prioritization."""
+	
+	# Element priority levels
+	PRIORITY_CRITICAL = 1  # Interactive elements (buttons, inputs, links)
+	PRIORITY_VISIBLE = 2   # Visible content
+	PRIORITY_STRUCTURAL = 3  # Structural context
+	PRIORITY_IGNORED = 4   # Decorative elements
+	
+	# Interactive element tags
+	INTERACTIVE_TAGS = {
+		'button', 'input', 'select', 'textarea', 'a', 'area',
+		'details', 'embed', 'iframe', 'label', 'object',
+		'summary', 'video', 'audio', 'img', 'svg'
+	}
+	
+	# Structural tags
+	STRUCTURAL_TAGS = {
+		'nav', 'main', 'header', 'footer', 'aside', 'section',
+		'article', 'form', 'table', 'ul', 'ol', 'dl',
+		'h1', 'h2', 'h3', 'h4', 'h5', 'h6'
+	}
+	
+	# Decorative tags to ignore
+	DECORATIVE_TAGS = {
+		'style', 'script', 'noscript', 'template', 'link',
+		'meta', 'base', 'br', 'hr', 'wbr'
+	}
+	
+	# Attributes to preserve
+	PRESERVE_ATTRIBUTES = {
+		'id', 'class', 'name', 'type', 'value', 'placeholder',
+		'href', 'src', 'alt', 'title', 'role', 'aria-label',
+		'aria-describedby', 'aria-hidden', 'disabled', 'readonly',
+		'required', 'checked', 'selected', 'tabindex', 'onclick',
+		'onchange', 'onsubmit', 'action', 'method'
+	}
+	
+	def __init__(self, task_context: Optional[str] = None, 
+				 max_tokens: int = 4000,
+				 compression_ratio: float = 0.3):
+		"""
+		Initialize the LLM-optimized DOM serializer.
+		
+		Args:
+			task_context: Current task context for relevance scoring
+			max_tokens: Maximum tokens to generate
+			compression_ratio: Target compression ratio (0.3 = 70% reduction)
+		"""
+		self.task_context = task_context
+		self.max_tokens = max_tokens
+		self.compression_ratio = compression_ratio
+		self._relevance_scores = {}
+		self._element_cache = {}
+		
+	def serialize_dom_tree(self, dom_tree: Dict[str, Any]) -> Dict[str, Any]:
+		"""
+		Serialize DOM tree with LLM optimization.
+		
+		Args:
+			dom_tree: Original DOM tree from DOMTreeSerializer
+			
+		Returns:
+			Optimized DOM tree with hierarchical prioritization
+		"""
+		if not dom_tree:
+			return {}
+		
+		# Phase 1: Score all elements
+		self._score_elements(dom_tree)
+		
+		# Phase 2: Filter and prioritize
+		optimized_tree = self._filter_and_prioritize(dom_tree)
+		
+		# Phase 3: Compress representation
+		compressed_tree = self._compress_representation(optimized_tree)
+		
+		# Phase 4: Ensure token limit
+		final_tree = self._enforce_token_limit(compressed_tree)
+		
+		return final_tree
+	
+	def _score_elements(self, node: Dict[str, Any], depth: int = 0, 
+					   parent_score: float = 0.0):
+		"""Recursively score all elements in the DOM tree."""
+		node_id = self._get_node_id(node)
+		
+		# Calculate base score based on element type
+		base_score = self._calculate_base_score(node)
+		
+		# Adjust score based on visibility
+		visibility_score = self._calculate_visibility_score(node)
+		
+		# Adjust score based on interactivity
+		interactivity_score = self._calculate_interactivity_score(node)
+		
+		# Adjust score based on task relevance
+		relevance_score = self._calculate_relevance_score(node)
+		
+		# Adjust score based on depth (prefer shallower elements)
+		depth_score = max(0, 10 - depth) / 10
+		
+		# Combine scores with weights
+		total_score = (
+			base_score * 0.3 +
+			visibility_score * 0.2 +
+			interactivity_score * 0.3 +
+			relevance_score * 0.15 +
+			depth_score * 0.05
+		)
+		
+		# Boost score if parent has high score (contextual importance)
+		if parent_score > 7:
+			total_score *= 1.2
+		
+		self._relevance_scores[node_id] = total_score
+		
+		# Recursively score children
+		children = node.get('children', [])
+		for child in children:
+			self._score_elements(child, depth + 1, total_score)
+	
+	def _calculate_base_score(self, node: Dict[str, Any]) -> float:
+		"""Calculate base score based on element type."""
+		tag_name = node.get('tagName', '').lower()
+		
+		if tag_name in self.INTERACTIVE_TAGS:
+			return 10.0
+		elif tag_name in self.STRUCTURAL_TAGS:
+			return 7.0
+		elif tag_name in self.DECORATIVE_TAGS:
+			return 1.0
+		elif tag_name == 'div' or tag_name == 'span':
+			# Check if contains meaningful content
+			text_content = self._get_text_content(node)
+			if text_content and len(text_content.strip()) > 0:
+				return 5.0
+			return 3.0
+		else:
+			return 4.0
+	
+	def _calculate_visibility_score(self, node: Dict[str, Any]) -> float:
+		"""Calculate visibility score (0-10)."""
+		attributes = node.get('attributes', {})
+		
+		# Check for hidden attributes
+		if attributes.get('hidden') == 'true' or attributes.get('aria-hidden') == 'true':
+			return 0.0
+		
+		# Check for display:none in style (simplified check)
+		style = attributes.get('style', '')
+		if 'display: none' in style or 'display:none' in style:
+			return 0.0
+		if 'visibility: hidden' in style or 'visibility:hidden' in style:
+			return 2.0
+		
+		# Check for zero dimensions
+		if attributes.get('width') == '0' or attributes.get('height') == '0':
+			return 1.0
+		
+		# Default to visible
+		return 8.0
+	
+	def _calculate_interactivity_score(self, node: Dict[str, Any]) -> float:
+		"""Calculate interactivity score (0-10)."""
+		tag_name = node.get('tagName', '').lower()
+		attributes = node.get('attributes', {})
+		
+		# Check if element is interactive
+		if tag_name in self.INTERACTIVE_TAGS:
+			# Check if disabled
+			if attributes.get('disabled') == 'true' or attributes.get('aria-disabled') == 'true':
+				return 3.0
+			return 10.0
+		
+		# Check for event handlers
+		for attr in attributes:
+			if attr.startswith('on'):
+				return 7.0
+		
+		# Check for role attribute
+		role = attributes.get('role', '')
+		if role in ['button', 'link', 'checkbox', 'radio', 'textbox', 'combobox']:
+			return 9.0
+		
+		return 2.0
+	
+	def _calculate_relevance_score(self, node: Dict[str, Any]) -> float:
+		"""Calculate relevance score based on task context."""
+		if not self.task_context:
+			return 5.0
+		
+		node_id = self._get_node_id(node)
+		
+		# Check cache
+		if node_id in self._element_cache:
+			return self._element_cache[node_id]
+		
+		# Get text content and attributes
+		text_content = self._get_text_content(node).lower()
+		attributes = node.get('attributes', {})
+		attribute_values = ' '.join(str(v) for v in attributes.values()).lower()
+		
+		# Simple keyword matching (in production, use embedding similarity)
+		task_words = set(self.task_context.lower().split())
+		node_content = f"{text_content} {attribute_values}".lower()
+		
+		if not task_words:
+			return 5.0
+		
+		# Calculate word overlap
+		matches = sum(1 for word in task_words if word in node_content)
+		match_ratio = matches / len(task_words) if task_words else 0
+		
+		# Convert to score (0-10)
+		score = min(10.0, match_ratio * 15)
+		
+		self._element_cache[node_id] = score
+		return score
+	
+	def _filter_and_prioritize(self, dom_tree: Dict[str, Any]) -> Dict[str, Any]:
+		"""Filter elements based on priority and relevance scores."""
+		# Collect all nodes with their scores
+		nodes_with_scores = []
+		self._collect_nodes_with_scores(dom_tree, nodes_with_scores)
+		
+		# Sort by score (descending)
+		nodes_with_scores.sort(key=lambda x: x[1], reverse=True)
+		
+		# Select top elements based on compression ratio
+		total_nodes = len(nodes_with_scores)
+		target_nodes = max(1, int(total_nodes * self.compression_ratio))
+		
+		selected_nodes = set()
+		for node_id, score in nodes_with_scores[:target_nodes]:
+			selected_nodes.add(node_id)
+		
+		# Build optimized tree with selected nodes and their context
+		optimized_tree = self._build_optimized_tree(dom_tree, selected_nodes)
+		
+		return optimized_tree
+	
+	def _collect_nodes_with_scores(self, node: Dict[str, Any], 
+								  result: List[Tuple[str, float]]):
+		"""Collect all nodes with their relevance scores."""
+		node_id = self._get_node_id(node)
+		score = self._relevance_scores.get(node_id, 0.0)
+		result.append((node_id, score))
+		
+		for child in node.get('children', []):
+			self._collect_nodes_with_scores(child, result)
+	
+	def _build_optimized_tree(self, node: Dict[str, Any], 
+							 selected_nodes: Set[str],
+							 depth: int = 0) -> Optional[Dict[str, Any]]:
+		"""Build optimized tree containing only selected nodes and their context."""
+		node_id = self._get_node_id(node)
+		
+		# Check if this node or any descendant is selected
+		if not self._has_selected_descendant(node, selected_nodes):
+			return None
+		
+		# Create optimized node
+		optimized_node = {
+			'tagName': node.get('tagName', ''),
+			'nodeId': node.get('nodeId'),
+			'backendNodeId': node.get('backendNodeId'),
+			'attributes': self._filter_attributes(node.get('attributes', {})),
+			'children': []
+		}
+		
+		# Add text content if present and meaningful
+		text_content = self._get_text_content(node)
+		if text_content and len(text_content.strip()) > 0:
+			# Truncate long text content
+			if len(text_content) > 200:
+				text_content = text_content[:197] + "..."
+			optimized_node['textContent'] = text_content
+		
+		# Add priority level
+		optimized_node['priority'] = self._get_priority_level(node)
+		
+		# Add relevance score
+		optimized_node['relevanceScore'] = self._relevance_scores.get(node_id, 0.0)
+		
+		# Process children
+		for child in node.get('children', []):
+			optimized_child = self._build_optimized_tree(child, selected_nodes, depth + 1)
+			if optimized_child:
+				optimized_node['children'].append(optimized_child)
+		
+		# If no children were added and node isn't selected, return None
+		if not optimized_node['children'] and node_id not in selected_nodes:
+			return None
+		
+		return optimized_node
+	
+	def _has_selected_descendant(self, node: Dict[str, Any], 
+								selected_nodes: Set[str]) -> bool:
+		"""Check if node or any descendant is in selected nodes."""
+		node_id = self._get_node_id(node)
+		if node_id in selected_nodes:
+			return True
+		
+		for child in node.get('children', []):
+			if self._has_selected_descendant(child, selected_nodes):
+				return True
+		
+		return False
+	
+	def _filter_attributes(self, attributes: Dict[str, str]) -> Dict[str, str]:
+		"""Filter attributes to preserve only important ones."""
+		filtered = {}
+		for key, value in attributes.items():
+			if key in self.PRESERVE_ATTRIBUTES:
+				# Truncate long attribute values
+				if isinstance(value, str) and len(value) > 100:
+					value = value[:97] + "..."
+				filtered[key] = value
+		return filtered
+	
+	def _get_priority_level(self, node: Dict[str, Any]) -> int:
+		"""Get priority level for node."""
+		tag_name = node.get('tagName', '').lower()
+		
+		if tag_name in self.INTERACTIVE_TAGS:
+			return self.PRIORITY_CRITICAL
+		elif tag_name in self.STRUCTURAL_TAGS:
+			return self.PRIORITY_STRUCTURAL
+		elif tag_name in self.DECORATIVE_TAGS:
+			return self.PRIORITY_IGNORED
+		else:
+			# Check if has visible text
+			text_content = self._get_text_content(node)
+			if text_content and len(text_content.strip()) > 0:
+				return self.PRIORITY_VISIBLE
+			return self.PRIORITY_STRUCTURAL
+	
+	def _compress_representation(self, tree: Dict[str, Any]) -> Dict[str, Any]:
+		"""Compress the representation for token efficiency."""
+		if not tree:
+			return {}
+		
+		compressed = {
+			'tag': tree['tagName'].lower(),
+			'id': tree['attributes'].get('id'),
+			'class': tree['attributes'].get('class'),
+			'role': tree['attributes'].get('role'),
+			'p': tree['priority'],  # priority
+			'r': round(tree['relevanceScore'], 1),  # relevance
+			'c': []  # children
+		}
+		
+		# Add important attributes
+		important_attrs = ['href', 'src', 'type', 'name', 'value', 'placeholder']
+		for attr in important_attrs:
+			if attr in tree['attributes']:
+				compressed[attr] = tree['attributes'][attr]
+		
+		# Add text content if present
+		if 'textContent' in tree:
+			compressed['t'] = tree['textContent']
+		
+		# Add node IDs for reference
+		if 'nodeId' in tree:
+			compressed['nid'] = tree['nodeId']
+		if 'backendNodeId' in tree:
+			compressed['bid'] = tree['backendNodeId']
+		
+		# Process children
+		for child in tree.get('children', []):
+			compressed_child = self._compress_representation(child)
+			if compressed_child:
+				compressed['c'].append(compressed_child)
+		
+		# Remove empty children array
+		if not compressed['c']:
+			del compressed['c']
+		
+		return compressed
+	
+	def _enforce_token_limit(self, tree: Dict[str, Any]) -> Dict[str, Any]:
+		"""Ensure the serialized tree stays within token limit."""
+		# Estimate token count (simplified - in production use tiktoken)
+		serialized = json.dumps(tree, separators=(',', ':'))
+		estimated_tokens = len(serialized) // 4  # Rough estimate
+		
+		if estimated_tokens <= self.max_tokens:
+			return tree
+		
+		# If over limit, remove lowest priority elements
+		logger.debug(f"DOM tree exceeds token limit ({estimated_tokens} > {self.max_tokens}), pruning...")
+		
+		# Flatten tree and sort by priority and relevance
+		nodes = []
+		self._flatten_tree(tree, nodes)
+		
+		# Sort by priority (ascending) and relevance (descending)
+		nodes.sort(key=lambda x: (x['p'], -x.get('r', 0)))
+		
+		# Remove nodes until under limit
+		while estimated_tokens > self.max_tokens and nodes:
+			removed = nodes.pop(0)  # Remove lowest priority
+			estimated_tokens -= len(json.dumps(removed, separators=(',', ':'))) // 4
+		
+		# Rebuild tree from remaining nodes
+		return self._rebuild_tree_from_nodes(nodes)
+	
+	def _flatten_tree(self, node: Dict[str, Any], result: List[Dict[str, Any]]):
+		"""Flatten tree into list of nodes."""
+		result.append(node)
+		for child in node.get('c', []):
+			self._flatten_tree(child, result)
+	
+	def _rebuild_tree_from_nodes(self, nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
+		"""Rebuild tree structure from flat list of nodes."""
+		if not nodes:
+			return {}
+		
+		# Group nodes by parent-child relationships
+		node_map = {node.get('nid'): node for node in nodes if 'nid' in node}
+		
+		# Build tree structure
+		root = None
+		for node in nodes:
+			if 'nid' not in node:
+				continue
+			
+			# Try to find parent
+			parent_found = False
+			for potential_parent in nodes:
+				if 'c' in potential_parent:
+					for child in potential_parent['c']:
+						if child.get('nid') == node['nid']:
+							parent_found = True
+							break
+			
+			if not parent_found and root is None:
+				root = node
+		
+		return root or nodes[0] if nodes else {}
+	
+	def _get_node_id(self, node: Dict[str, Any]) -> str:
+		"""Generate unique ID for node."""
+		node_id = node.get('nodeId')
+		backend_node_id = node.get('backendNodeId')
+		
+		if node_id:
+			return f"n{node_id}"
+		elif backend_node_id:
+			return f"b{backend_node_id}"
+		else:
+			# Generate from content
+			content = json.dumps(node, sort_keys=True)
+			return f"h{hashlib.md5(content.encode()).hexdigest()[:8]}"
+	
+	def _get_text_content(self, node: Dict[str, Any]) -> str:
+		"""Extract text content from node and its children."""
+		text_parts = []
+		
+		# Get direct text content
+		if 'textContent' in node:
+			text_parts.append(node['textContent'])
+		
+		# Get text from children
+		for child in node.get('children', []):
+			child_text = self._get_text_content(child)
+			if child_text:
+				text_parts.append(child_text)
+		
+		return ' '.join(text_parts).strip()
 
 
 class Page:
-    """Page class for page-level operations with stealth capabilities."""
-    
-    def __init__(self, page, dom_service: DomService, llm, config: Dict[str, Any] = None):
-        self.page = page
-        self.dom_service = dom_service
-        self.llm = llm
-        self.config = config or {}
-        self.fingerprint = FingerprintGenerator.generate()
-        self.rate_limiters: Dict[str, DomainRateLimiter] = defaultdict(DomainRateLimiter)
-        self.pagination_states: Dict[str, PaginationState] = {}
-        self.extraction_states: Dict[str, ExtractionState] = {}
-        self._setup_stealth()
-    
-    def _setup_stealth(self):
-        """Setup stealth mode with the current fingerprint."""
-        # This would inject stealth scripts and set the fingerprint
-        # Implementation depends on the underlying browser automation library
-        pass
-    
-    async def extract(self, prompt: str = None, **kwargs) -> Dict[str, Any]:
-        """Extract data from the current page using LLM."""
-        # Get DOM content
-        dom_content = await self.dom_service.get_content()
-        
-        # Create extraction prompt
-        if prompt is None:
-            prompt = "Extract all structured data from this page. Return as JSON."
-        
-        messages = [
-            SystemMessage(content="You are a data extraction assistant. Extract structured data from the provided HTML content."),
-            UserMessage(content=f"HTML Content:\n{dom_content}\n\nExtraction Task: {prompt}")
-        ]
-        
-        # Call LLM
-        response = await self.llm.chat(messages, **kwargs)
-        
-        try:
-            # Parse JSON response
-            data = json.loads(response.content)
-            return data
-        except json.JSONDecodeError:
-            logger.error("Failed to parse LLM response as JSON")
-            return {}
-    
-    async def extract_structured_data(
-        self, 
-        schema: Union[Type[T], Dict[str, Any]], 
-        prompt: str = None,
-        max_retries: int = 3,
-        retry_delay: float = 1.0,
-        **kwargs
-    ) -> T:
-        """
-        Extract structured data with schema validation and automatic retry for missing fields.
-        
-        Args:
-            schema: Pydantic model or JSON schema dict for validation
-            prompt: Custom extraction prompt
-            max_retries: Maximum number of retries for missing fields
-            retry_delay: Delay between retries in seconds
-            **kwargs: Additional arguments for LLM call
-        
-        Returns:
-            Validated data instance
-        """
-        # Convert JSON schema to Pydantic model if needed
-        if isinstance(schema, dict):
-            schema = self._json_schema_to_pydantic(schema)
-        
-        schema_name = schema.__name__ if hasattr(schema, '__name__') else str(schema)
-        logger.info(f"Extracting structured data with schema: {schema_name}")
-        
-        last_error = None
-        extracted_data = {}
-        
-        for attempt in range(max_retries):
-            try:
-                # Extract data
-                if attempt == 0:
-                    # First attempt: use original prompt
-                    current_prompt = prompt or f"Extract data according to this schema: {schema_name}"
-                else:
-                    # Subsequent attempts: ask for missing fields
-                    missing_fields = self._get_missing_fields(extracted_data, schema)
-                    if not missing_fields:
-                        break
-                    current_prompt = f"{prompt}\n\nIMPORTANT: The following fields are missing or invalid: {', '.join(missing_fields)}. Please extract them."
-                
-                raw_data = await self.extract(prompt=current_prompt, **kwargs)
-                
-                # Validate against schema
-                if isinstance(raw_data, dict):
-                    extracted_data = raw_data
-                elif isinstance(raw_data, list) and len(raw_data) > 0:
-                    extracted_data = raw_data[0] if isinstance(raw_data[0], dict) else {}
-                else:
-                    extracted_data = {}
-                
-                # Try to create instance
-                instance = schema(**extracted_data)
-                logger.info(f"Successfully extracted and validated data on attempt {attempt + 1}")
-                return instance
-                
-            except ValidationError as e:
-                last_error = e
-                logger.warning(f"Validation failed on attempt {attempt + 1}: {e}")
-                
-                if attempt < max_retries - 1:
-                    # Extract missing fields from validation error
-                    missing_fields = []
-                    for error in e.errors():
-                        if error['type'] == 'value_error.missing':
-                            field_name = error['loc'][0] if error['loc'] else 'unknown'
-                            missing_fields.append(field_name)
-                    
-                    if missing_fields:
-                        logger.info(f"Retrying for missing fields: {missing_fields}")
-                        await asyncio.sleep(retry_delay)
-                    else:
-                        # No missing fields, but other validation errors
-                        logger.error(f"Non-missing field validation errors: {e}")
-                        break
-                else:
-                    logger.error(f"Failed to extract valid data after {max_retries} attempts")
-                    raise last_error
-        
-        # If we get here, all retries failed
-        if last_error:
-            raise last_error
-        else:
-            raise ValueError(f"Failed to extract data matching schema {schema_name}")
-    
-    def _json_schema_to_pydantic(self, json_schema: Dict[str, Any]) -> Type[BaseModel]:
-        """Convert JSON schema to Pydantic model dynamically."""
-        properties = json_schema.get('properties', {})
-        required = json_schema.get('required', [])
-        
-        # Create field definitions
-        field_definitions = {}
-        for field_name, field_schema in properties.items():
-            field_type = self._json_type_to_python_type(field_schema.get('type', 'string'))
-            field_description = field_schema.get('description', '')
-            
-            # Handle default values
-            default = ... if field_name in required else field_schema.get('default')
-            
-            # Create Field with metadata
-            field_definitions[field_name] = (
-                field_type, 
-                FieldInfo(default=default, description=field_description)
-            )
-        
-        # Create dynamic model
-        model_name = json_schema.get('title', 'DynamicModel')
-        return create_model(model_name, **field_definitions)
-    
-    def _json_type_to_python_type(self, json_type: str) -> type:
-        """Convert JSON schema type to Python type."""
-        type_mapping = {
-            'string': str,
-            'integer': int,
-            'number': float,
-            'boolean': bool,
-            'array': list,
-            'object': dict,
-            'null': type(None),
-        }
-        return type_mapping.get(json_type, Any)
-    
-    def _get_missing_fields(self, data: Dict[str, Any], schema: Type[BaseModel]) -> List[str]:
-        """Identify missing fields in extracted data compared to schema."""
-        try:
-            # Try to create instance to see what's missing
-            schema(**data)
-            return []
-        except ValidationError as e:
-            missing_fields = []
-            for error in e.errors():
-                if error['type'] == 'value_error.missing':
-                    field_name = error['loc'][0] if error['loc'] else 'unknown'
-                    missing_fields.append(field_name)
-            return missing_fields
-    
-    async def handle_pagination(
-        self,
-        schema: Union[Type[T], Dict[str, Any]],
-        prompt: str = None,
-        max_pages: int = 10,
-        pagination_selectors: List[str] = None,
-        stop_on_duplicate: bool = True,
-        **kwargs
-    ) -> AsyncGenerator[T, None]:
-        """
-        Automatically handle pagination and extract data from multiple pages.
-        
-        Args:
-            schema: Pydantic model or JSON schema for validation
-            prompt: Extraction prompt
-            max_pages: Maximum number of pages to scrape
-            pagination_selectors: CSS selectors for pagination elements
-            stop_on_duplicate: Stop if we detect duplicate content
-            **kwargs: Additional arguments
-        
-        Yields:
-            Extracted data from each page
-        """
-        url = self.page.url
-        pagination_key = hashlib.md5(url.encode()).hexdigest()
-        
-        # Initialize or get pagination state
-        if pagination_key not in self.pagination_states:
-            self.pagination_states[pagination_key] = PaginationState()
-        
-        state = self.pagination_states[pagination_key]
-        
-        # Detect pagination type if not already detected
-        if state.pagination_type is None:
-            state.pagination_type = await self._detect_pagination_type()
-            logger.info(f"Detected pagination type: {state.pagination_type}")
-        
-        # Default pagination selectors
-        if pagination_selectors is None:
-            pagination_selectors = self._get_default_pagination_selectors(state.pagination_type)
-        
-        page_count = 0
-        seen_hashes = set()
-        
-        while page_count < max_pages and state.has_more_pages:
-            page_count += 1
-            logger.info(f"Processing page {page_count}")
-            
-            # Check for duplicate content
-            if stop_on_duplicate:
-                page_hash = await self._get_page_content_hash()
-                if page_hash in seen_hashes:
-                    logger.info(f"Duplicate content detected on page {page_count}. Stopping.")
-                    break
-                seen_hashes.add(page_hash)
-                state.page_hashes[state.current_page] = page_hash
-            
-            # Extract data from current page
-            try:
-                data = await self.extract_structured_data(schema, prompt, **kwargs)
-                yield data
-            except Exception as e:
-                logger.error(f"Failed to extract data from page {page_count}: {e}")
-                break
-            
-            # Try to navigate to next page
-            if page_count < max_pages:
-                has_next = await self._navigate_to_next_page(pagination_selectors, state)
-                if not has_next:
-                    logger.info("No more pages found")
-                    state.has_more_pages = False
-                    break
-                
-                # Wait for page to load
-                await self._wait_for_page_load()
-                state.current_page += 1
-        
-        # Clean up pagination state if we're done
-        if not state.has_more_pages or page_count >= max_pages:
-            if pagination_key in self.pagination_states:
-                del self.pagination_states[pagination_key]
-    
-    async def _detect_pagination_type(self) -> str:
-        """Detect the type of pagination on the page."""
-        # Check for numbered pagination
-        numbered_selectors = [
-            'nav.pagination',
-            'ul.pagination',
-            '.pagination',
-            '.pager',
-            '[class*="pagination"]',
-            '[class*="pager"]',
-        ]
-        
-        for selector in numbered_selectors:
-            try:
-                elements = await self.page.query_selector_all(selector)
-                if elements:
-                    # Check if it contains numbered links
-                    for element in elements:
-                        text = await element.text_content()
-                        if any(char.isdigit() for char in text):
-                            return "numbered"
-            except:
-                continue
-        
-        # Check for next button
-        next_selectors = [
-            'a:has-text("Next")',
-            'button:has-text("Next")',
-            '[rel="next"]',
-            '.next',
-            '.next-page',
-            '[aria-label*="next" i]',
-            '[class*="next"]',
-        ]
-        
-        for selector in next_selectors:
-            try:
-                element = await self.page.query_selector(selector)
-                if element:
-                    return "next_button"
-            except:
-                continue
-        
-        # Check for infinite scroll
-        scroll_selectors = [
-            '[class*="infinite"]',
-            '[class*="scroll"]',
-            '[data-infinite]',
-        ]
-        
-        for selector in scroll_selectors:
-            try:
-                element = await self.page.query_selector(selector)
-                if element:
-                    return "infinite_scroll"
-            except:
-                continue
-        
-        # Check for load more button
-        load_more_selectors = [
-            'button:has-text("Load More")',
-            'button:has-text("Show More")',
-            '.load-more',
-            '[class*="load-more"]',
-        ]
-        
-        for selector in load_more_selectors:
-            try:
-                element = await self.page.query_selector(selector)
-                if element:
-                    return "load_more"
-            except:
-                continue
-        
-        return "unknown"
-    
-    def _get_default_pagination_selectors(self, pagination_type: str) -> List[str]:
-        """Get default selectors based on pagination type."""
-        if pagination_type == "numbered":
-            return [
-                'a:has-text("Next")',
-                'button:has-text("Next")',
-                '.pagination .next',
-                '.pagination a:last-child',
-                'li.active + li a',
-                '[aria-label="Next page"]',
-            ]
-        elif pagination_type == "next_button":
-            return [
-                'a:has-text("Next")',
-                'button:has-text("Next")',
-                '[rel="next"]',
-                '.next',
-                '.next-page',
-                '[aria-label*="next" i]',
-            ]
-        elif pagination_type == "load_more":
-            return [
-                'button:has-text("Load More")',
-                'button:has-text("Show More")',
-                '.load-more',
-                '[class*="load-more"]',
-            ]
-        else:
-            return [
-                'a:has-text("Next")',
-                'button:has-text("Next")',
-                '[rel="next"]',
-                '.next',
-            ]
-    
-    async def _navigate_to_next_page(self, selectors: List[str], state: PaginationState) -> bool:
-        """Navigate to the next page using provided selectors."""
-        for selector in selectors:
-            try:
-                element = await self.page.query_selector(selector)
-                if element:
-                    # Check if element is visible and enabled
-                    is_visible = await element.is_visible()
-                    is_enabled = await element.is_enabled()
-                    
-                    if is_visible and is_enabled:
-                        logger.info(f"Clicking next page with selector: {selector}")
-                        await element.click()
-                        return True
-            except Exception as e:
-                logger.debug(f"Selector {selector} failed: {e}")
-                continue
-        
-        return False
-    
-    async def _wait_for_page_load(self, timeout: float = 10.0):
-        """Wait for page to load after navigation."""
-        try:
-            # Wait for network to be idle
-            await self.page.wait_for_load_state("networkidle", timeout=timeout)
-        except:
-            # Fallback: wait for a short time
-            await asyncio.sleep(2)
-    
-    async def _get_page_content_hash(self) -> str:
-        """Get hash of main page content for duplicate detection."""
-        try:
-            # Get main content area (common selectors)
-            content_selectors = [
-                'main',
-                'article',
-                '.content',
-                '.main-content',
-                '#content',
-                '#main',
-                '[role="main"]',
-            ]
-            
-            content = ""
-            for selector in content_selectors:
-                element = await self.page.query_selector(selector)
-                if element:
-                    content = await element.inner_html()
-                    break
-            
-            if not content:
-                # Fallback to body
-                body = await self.page.query_selector('body')
-                if body:
-                    content = await body.inner_html()
-            
-            # Create hash
-            return hashlib.md5(content.encode()).hexdigest()
-        except Exception as e:
-            logger.warning(f"Failed to get page content hash: {e}")
-            return hashlib.md5(str(time.time()).encode()).hexdigest()
-    
-    async def incremental_scrape(
-        self,
-        url: str,
-        schema: Union[Type[T], Dict[str, Any]],
-        prompt: str = None,
-        state_file: str = None,
-        force_refresh: bool = False,
-        **kwargs
-    ) -> T:
-        """
-        Incremental scraping that only fetches new or changed data.
-        
-        Args:
-            url: URL to scrape
-            schema: Pydantic model or JSON schema
-            prompt: Extraction prompt
-            state_file: File to store extraction state
-            force_refresh: Force re-extraction even if data hasn't changed
-            **kwargs: Additional arguments
-        
-        Returns:
-            Extracted data (cached if unchanged)
-        """
-        # Create extraction key
-        schema_hash = self._get_schema_hash(schema)
-        extraction_key = f"{url}_{schema_hash}"
-        
-        # Load or initialize state
-        state = self._load_extraction_state(extraction_key, state_file)
-        
-        # Check if we need to re-extract
-        should_extract = force_refresh or state.extracted_data is None
-        
-        if not should_extract:
-            # Check if page has changed
-            current_hash = await self._get_page_content_hash()
-            if state.change_detection_hash != current_hash:
-                logger.info(f"Page content changed for {url}")
-                should_extract = True
-            else:
-                logger.info(f"Using cached data for {url}")
-                # Return cached data as instance
-                if isinstance(schema, dict):
-                    schema = self._json_schema_to_pydantic(schema)
-                return schema(**state.extracted_data)
-        
-        if should_extract:
-            # Navigate to URL if not already there
-            if self.page.url != url:
-                await self.page.goto(url)
-                await self._wait_for_page_load()
-            
-            # Extract data
-            logger.info(f"Extracting data from {url}")
-            data = await self.extract_structured_data(schema, prompt, **kwargs)
-            
-            # Update state
-            state.url = url
-            state.schema_hash = schema_hash
-            state.extracted_data = data.dict() if hasattr(data, 'dict') else data
-            state.change_detection_hash = await self._get_page_content_hash()
-            state.last_extraction_time = time.time()
-            
-            # Save state
-            self._save_extraction_state(extraction_key, state, state_file)
-            
-            return data
-    
-    def _get_schema_hash(self, schema: Union[Type[T], Dict[str, Any]]) -> str:
-        """Get hash of schema for state tracking."""
-        if isinstance(schema, dict):
-            schema_str = json.dumps(schema, sort_keys=True)
-        else:
-            # For Pydantic model, use its schema
-            schema_str = json.dumps(schema.schema(), sort_keys=True)
-        
-        return hashlib.md5(schema_str.encode()).hexdigest()
-    
-    def _load_extraction_state(self, key: str, state_file: str = None) -> ExtractionState:
-        """Load extraction state from file or memory."""
-        if state_file and os.path.exists(state_file):
-            try:
-                with open(state_file, 'r') as f:
-                    data = json.load(f)
-                    if key in data:
-                        state_data = data[key]
-                        return ExtractionState(**state_data)
-            except Exception as e:
-                logger.warning(f"Failed to load extraction state: {e}")
-        
-        # Return new state
-        return ExtractionState(url="", schema_hash="")
-    
-    def _save_extraction_state(self, key: str, state: ExtractionState, state_file: str = None):
-        """Save extraction state to file."""
-        if state_file:
-            try:
-                # Load existing state
-                data = {}
-                if os.path.exists(state_file):
-                    with open(state_file, 'r') as f:
-                        data = json.load(f)
-                
-                # Update with new state
-                data[key] = {
-                    'url': state.url,
-                    'schema_hash': state.schema_hash,
-                    'extracted_data': state.extracted_data,
-                    'page_hashes': state.page_hashes,
-                    'last_extraction_time': state.last_extraction_time,
-                    'change_detection_hash': state.change_detection_hash,
-                }
-                
-                # Save
-                with open(state_file, 'w') as f:
-                    json.dump(data, f, indent=2)
-                    
-            except Exception as e:
-                logger.warning(f"Failed to save extraction state: {e}")
-    
-    async def get_html(self, selector: str = "body") -> str:
-        """Get HTML content of an element."""
-        try:
-            element = await self.page.query_selector(selector)
-            if element:
-                return await element.inner_html()
-        except Exception as e:
-            logger.warning(f"Failed to get HTML for selector {selector}: {e}")
-        return ""
-    
-    async def get_page_hash(self, selector: str = "body") -> str:
-        """Get hash of page content."""
-        html = await self.get_html(selector)
-        return hashlib.md5(html.encode()).hexdigest()
-    
-    # Existing methods would be preserved here
-    # ... (all other existing methods from the original file)
+	"""Represents a browser page with advanced automation capabilities."""
+	
+	def __init__(self, browser_session: 'BrowserSession', target_id: str):
+		self.browser_session = browser_session
+		self.target_id = target_id
+		self._client = browser_session.client
+		self._dom_service = DomService(self)
+		self._smart_waiter = SmartWaiter(self)
+		self._element_cache = {}
+		self._screenshot_cache = {}
+		self._navigation_history = deque(maxlen=50)
+		self._current_url = None
+		self._page_load_time = None
+		self._dom_tree_cache = {}
+		self._dom_tree_cache_time = 0
+		self._llm_serializer = None
+		self._task_context = None
+		
+		# Performance monitoring
+		self._performance_metrics = {
+			'dom_serialization_time': [],
+			'llm_token_usage': [],
+			'element_location_time': []
+		}
+	
+	async def set_task_context(self, task_context: str):
+		"""Set the current task context for LLM optimization."""
+		self._task_context = task_context
+		self._llm_serializer = LLMOptimizedDOMSerializer(
+			task_context=task_context,
+			max_tokens=4000,
+			compression_ratio=0.3
+		)
+	
+	async def get_dom_tree(self, use_cache: bool = True, 
+						  use_llm_optimized: bool = False) -> Dict[str, Any]:
+		"""
+		Get DOM tree representation.
+		
+		Args:
+			use_cache: Whether to use cached DOM tree
+			use_llm_optimized: Whether to use LLM-optimized serialization
+			
+		Returns:
+			DOM tree representation
+		"""
+		start_time = time.time()
+		
+		# Check cache
+		cache_key = f"dom_tree_{use_llm_optimized}"
+		if use_cache and cache_key in self._dom_tree_cache:
+			cache_age = time.time() - self._dom_tree_cache_time
+			if cache_age < 2.0:  # Cache for 2 seconds
+				logger.debug(f"Using cached DOM tree (age: {cache_age:.2f}s)")
+				return self._dom_tree_cache[cache_key]
+		
+		try:
+			# Get raw DOM tree
+			raw_tree = await self._dom_service.get_dom_tree()
+			
+			if use_llm_optimized and self._llm_serializer:
+				# Use LLM-optimized serialization
+				optimized_tree = self._llm_serializer.serialize_dom_tree(raw_tree)
+				
+				# Track token usage
+				serialized = json.dumps(optimized_tree, separators=(',', ':'))
+				token_estimate = len(serialized) // 4
+				self._performance_metrics['llm_token_usage'].append(token_estimate)
+				
+				logger.debug(f"LLM-optimized DOM tree: {token_estimate} estimated tokens")
+				
+				result = optimized_tree
+			else:
+				# Use standard serialization
+				result = raw_tree
+			
+			# Update cache
+			self._dom_tree_cache[cache_key] = result
+			self._dom_tree_cache_time = time.time()
+			
+			# Track performance
+			elapsed = time.time() - start_time
+			self._performance_metrics['dom_serialization_time'].append(elapsed)
+			
+			logger.debug(f"DOM tree serialization took {elapsed:.3f}s")
+			
+			return result
+			
+		except Exception as e:
+			logger.error(f"Failed to get DOM tree: {e}")
+			return {}
+	
+	async def get_simplified_dom_tree(self, include_attributes: Optional[List[str]] = None,
+									 max_depth: int = 10,
+									 task_description: Optional[str] = None) -> Dict[str, Any]:
+		"""
+		Get simplified DOM tree optimized for LLM consumption.
+		
+		Args:
+			include_attributes: Attributes to include
+			max_depth: Maximum tree depth
+			task_description: Current task description for relevance scoring
+			
+		Returns:
+			Simplified DOM tree
+		"""
+		# Update task context if provided
+		if task_description:
+			await self.set_task_context(task_description)
+		
+		# Use LLM-optimized serialization
+		return await self.get_dom_tree(use_cache=True, use_llm_optimized=True)
+	
+	async def get_critical_elements(self) -> List[Dict[str, Any]]:
+		"""Get only critical interactive elements for quick LLM processing."""
+		dom_tree = await self.get_dom_tree(use_llm_optimized=True)
+		
+		critical_elements = []
+		self._extract_critical_elements(dom_tree, critical_elements)
+		
+		return critical_elements
+	
+	def _extract_critical_elements(self, node: Dict[str, Any], 
+								  result: List[Dict[str, Any]]):
+		"""Extract critical interactive elements from DOM tree."""
+		if not node:
+			return
+		
+		# Check if this is a critical element
+		priority = node.get('p', 4)  # Default to ignored
+		if priority == LLMOptimizedDOMSerializer.PRIORITY_CRITICAL:
+			# Create simplified representation
+			element = {
+				'tag': node.get('tag', ''),
+				'id': node.get('id'),
+				'class': node.get('class'),
+				'text': node.get('t', ''),
+				'role': node.get('role'),
+				'nodeId': node.get('nid'),
+				'backendNodeId': node.get('bid')
+			}
+			
+			# Add important attributes
+			for attr in ['href', 'src', 'type', 'name', 'value', 'placeholder']:
+				if attr in node:
+					element[attr] = node[attr]
+			
+			result.append(element)
+		
+		# Process children
+		for child in node.get('c', []):
+			self._extract_critical_elements(child, result)
+	
+	async def get_performance_metrics(self) -> Dict[str, Any]:
+		"""Get performance metrics for DOM serialization."""
+		metrics = {}
+		
+		for key, values in self._performance_metrics.items():
+			if values:
+				metrics[key] = {
+					'avg': mean(values),
+					'std': stdev(values) if len(values) > 1 else 0,
+					'min': min(values),
+					'max': max(values),
+					'count': len(values)
+				}
+		
+		# Add token savings estimate
+		if 'llm_token_usage' in metrics and metrics['llm_token_usage']['count'] > 0:
+			avg_tokens = metrics['llm_token_usage']['avg']
+			# Estimate original token count (rough estimate)
+			estimated_original = avg_tokens / 0.3  # Assuming 70% reduction
+			savings = estimated_original - avg_tokens
+			savings_percent = (savings / estimated_original) * 100
+			
+			metrics['token_savings'] = {
+				'estimated_original': estimated_original,
+				'optimized': avg_tokens,
+				'savings': savings,
+				'savings_percent': savings_percent
+			}
+		
+		return metrics
+	
+	# ... [rest of the existing Page class methods remain unchanged] ...

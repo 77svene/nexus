@@ -2,7 +2,6 @@ import base64
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, List, Dict, Any
 
 import anyio
 from bubus import BaseEvent
@@ -31,13 +30,6 @@ class UpdateAgentTaskEvent(BaseEvent):
 	user_feedback_type: str | None = Field(None, max_length=10)  # UserFeedbackType enum value as string
 	user_comment: str | None = Field(None, max_length=MAX_COMMENT_LENGTH)
 	gif_url: str | None = Field(None, max_length=MAX_URL_LENGTH)
-	
-	# Real-time collaboration fields
-	intervention_type: str | None = Field(None, max_length=50)  # 'pause', 'resume', 'correct', 'feedback'
-	intervention_data: dict | None = None  # Structured data for interventions
-	step_to_rewind: int | None = Field(None, ge=0)  # Step number to rewind to
-	correction_actions: List[Dict[str, Any]] | None = None  # Injected actions to replace current queue
-	correction_reason: str | None = Field(None, max_length=MAX_COMMENT_LENGTH)  # Reason for correction
 
 	@classmethod
 	def from_agent(cls, agent) -> 'UpdateAgentTaskEvent':
@@ -62,11 +54,6 @@ class UpdateAgentTaskEvent(BaseEvent):
 			user_feedback_type=None,
 			user_comment=None,
 			gif_url=None,
-			intervention_type=None,
-			intervention_data=None,
-			step_to_rewind=None,
-			correction_actions=None,
-			correction_reason=None,
 			# user_feedback_type and user_comment would be set by the API/frontend
 			# gif_url would be set after GIF generation if needed
 		)
@@ -141,15 +128,6 @@ class CreateAgentStepEvent(BaseEvent):
 	actions: list[dict]
 	screenshot_url: str | None = Field(None, max_length=MAX_FILE_CONTENT_SIZE)  # ~50MB for base64 images
 	url: str = Field(default='', max_length=MAX_URL_LENGTH)
-	
-	# Real-time collaboration fields
-	action_queue: List[Dict[str, Any]] | None = None  # Full action queue for this step
-	performance_metrics: Dict[str, Any] | None = None  # Step timing, token usage, etc.
-	reasoning_chain: List[str] | None = None  # Step-by-step reasoning
-	confidence_score: float | None = Field(None, ge=0.0, le=1.0)  # Agent's confidence in this step
-	human_feedback: Dict[str, Any] | None = None  # Feedback received for this step
-	is_corrected: bool = False  # Whether this step was corrected by human
-	correction_applied: str | None = None  # Description of correction applied
 
 	@field_validator('screenshot_url')
 	@classmethod
@@ -190,16 +168,6 @@ class CreateAgentStepEvent(BaseEvent):
 			logger = logging.getLogger(__name__)
 			logger.debug('📸 No screenshot in browser_state_summary for CreateAgentStepEvent')
 
-		# Extract performance metrics if available
-		performance_metrics = {}
-		if hasattr(agent, 'state') and hasattr(agent.state, 'step_metrics'):
-			performance_metrics = agent.state.step_metrics.get(agent.state.n_steps, {})
-		
-		# Extract reasoning chain if available
-		reasoning_chain = []
-		if current_state and hasattr(current_state, 'reasoning_chain'):
-			reasoning_chain = current_state.reasoning_chain
-
 		return cls(
 			user_id='',  # To be filled by cloud handler
 			device_id=agent.cloud_sync.auth_client.device_id
@@ -213,13 +181,6 @@ class CreateAgentStepEvent(BaseEvent):
 			actions=actions_data,  # List of action dicts
 			url=browser_state_summary.url,
 			screenshot_url=screenshot_url,
-			action_queue=actions_data,  # Full queue for this step
-			performance_metrics=performance_metrics,
-			reasoning_chain=reasoning_chain,
-			confidence_score=getattr(model_output, 'confidence', None),
-			human_feedback=None,  # Will be populated from feedback events
-			is_corrected=False,
-			correction_applied=None,
 		)
 
 
@@ -238,100 +199,86 @@ class CreateAgentTaskEvent(BaseEvent):
 	started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 	finished_at: datetime | None = None
 	agent_state: dict = Field(default_factory=dict)
-	user_feedback_type: str | None = Field(None, max_length=10)  # UserFeedbackTyp
+	user_feedback_type: str | None = Field(None, max_length=10)  # UserFeedbackType enum value as string
+	user_comment: str | None = Field(None, max_length=MAX_COMMENT_LENGTH)
+	gif_url: str | None = Field(None, max_length=MAX_URL_LENGTH)
+
+	@classmethod
+	def from_agent(cls, agent) -> 'CreateAgentTaskEvent':
+		"""Create a CreateAgentTaskEvent from an Agent instance"""
+		return cls(
+			id=str(agent.task_id),
+			user_id='',  # To be filled by cloud handler
+			device_id=agent.cloud_sync.auth_client.device_id
+			if hasattr(agent, 'cloud_sync') and agent.cloud_sync and agent.cloud_sync.auth_client
+			else None,
+			agent_session_id=str(agent.session_id),
+			task=agent.task,
+			llm_model=agent.llm.model_name,
+			agent_state=agent.state.model_dump() if hasattr(agent.state, 'model_dump') else {},
+			stopped=False,
+			paused=False,
+			done_output=None,
+			started_at=datetime.fromtimestamp(agent._task_start_time, tz=timezone.utc),
+			finished_at=None,
+			user_feedback_type=None,
+			user_comment=None,
+			gif_url=None,
+		)
 
 
-class AgentInterventionEvent(BaseEvent):
-	"""Event for real-time human interventions"""
+class CreateAgentSessionEvent(BaseEvent):
+	# Model fields
 	id: str = Field(default_factory=uuid7str)
 	user_id: str = Field(max_length=255)
-	device_id: str | None = Field(None, max_length=255)
-	task_id: str
-	intervention_type: str = Field(max_length=50)  # 'pause', 'resume', 'rewind', 'inject_action', 'provide_feedback'
-	step_number: int | None = Field(None, ge=0)  # Target step for intervention
-	timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-	
-	# Intervention-specific data
-	action_to_inject: Dict[str, Any] | None = None  # For inject_action
-	feedback_type: str | None = Field(None, max_length=20)  # 'positive', 'negative', 'correction'
-	feedback_comment: str | None = Field(None, max_length=MAX_COMMENT_LENGTH)
-	rewind_to_step: int | None = Field(None, ge=0)  # For rewind
-	correction_reason: str | None = Field(None, max_length=MAX_COMMENT_LENGTH)
-	
-	# Metadata
-	source: str = Field(default="dashboard", max_length=50)  # 'dashboard', 'api', 'mobile'
-	priority: int = Field(default=0, ge=0, le=10)  # Higher priority interventions processed first
+	device_id: str | None = Field(None, max_length=255)  # Device ID for auth lookup
+	browser_session_id: str = Field(max_length=255)
+	browser_session_live_url: str = Field(max_length=MAX_URL_LENGTH)
+	browser_session_cdp_url: str = Field(max_length=MAX_URL_LENGTH)
+	browser_session_stopped: bool = False
+	browser_session_stopped_at: datetime | None = None
+	is_source_api: bool | None = None
+	browser_state: dict = Field(default_factory=dict)
+	browser_session_data: dict | None = None
+
+	@classmethod
+	def from_agent(cls, agent) -> 'CreateAgentSessionEvent':
+		"""Create a CreateAgentSessionEvent from an Agent instance"""
+		return cls(
+			id=str(agent.session_id),
+			user_id='',  # To be filled by cloud handler
+			device_id=agent.cloud_sync.auth_client.device_id
+			if hasattr(agent, 'cloud_sync') and agent.cloud_sync and agent.cloud_sync.auth_client
+			else None,
+			browser_session_id=agent.browser_session.id,
+			browser_session_live_url='',  # To be filled by cloud handler
+			browser_session_cdp_url='',  # To be filled by cloud handler
+			browser_state={
+				'viewport': agent.browser_profile.viewport if agent.browser_profile else {'width': 1280, 'height': 720},
+				'user_agent': agent.browser_profile.user_agent if agent.browser_profile else None,
+				'headless': agent.browser_profile.headless if agent.browser_profile else True,
+				'initial_url': None,  # Will be updated during execution
+				'final_url': None,  # Will be updated during execution
+				'total_pages_visited': 0,  # Will be updated during execution
+				'session_duration_seconds': 0,  # Will be updated during execution
+			},
+			browser_session_data={
+				'cookies': [],
+				'secrets': {},
+				# TODO: send secrets safely so tasks can be replayed on cloud seamlessly
+				# 'secrets': dict(agent.sensitive_data) if agent.sensitive_data else {},
+				'allowed_domains': agent.browser_profile.allowed_domains if agent.browser_profile else [],
+			},
+		)
 
 
-class AgentPerformanceMetricsEvent(BaseEvent):
-	"""Event for streaming performance metrics"""
-	id: str = Field(default_factory=uuid7str)
+class UpdateAgentSessionEvent(BaseEvent):
+	"""Event to update an existing agent session"""
+
+	# Model fields
+	id: str  # Session ID to update
 	user_id: str = Field(max_length=255)
 	device_id: str | None = Field(None, max_length=255)
-	task_id: str
-	timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-	
-	# Performance metrics
-	step_duration_ms: float | None = None
-	token_usage: Dict[str, int] | None = None  # prompt_tokens, completion_tokens, total_tokens
-	action_success_rate: float | None = Field(None, ge=0.0, le=1.0)
-	error_count: int = Field(default=0, ge=0)
-	retry_count: int = Field(default=0, ge=0)
-	
-	# System metrics
-	cpu_usage_percent: float | None = None
-	memory_usage_mb: float | None = None
-	network_latency_ms: float | None = None
-
-
-class AgentLiveStateEvent(BaseEvent):
-	"""Event for streaming live agent state updates"""
-	id: str = Field(default_factory=uuid7str)
-	user_id: str = Field(max_length=255)
-	device_id: str | None = Field(None, max_length=255)
-	task_id: str
-	timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-	
-	# Live state
-	current_step: int
-	is_paused: bool
-	is_stopped: bool
-	action_queue_length: int
-	current_action: Dict[str, Any] | None = None
-	next_actions_preview: List[Dict[str, Any]] | None = None
-	
-	# Browser state
-	current_url: str | None = None
-	page_title: str | None = None
-	dom_element_count: int | None = None
-	
-	# Agent reasoning
-	current_goal: str | None = None
-	confidence: float | None = Field(None, ge=0.0, le=1.0)
-	estimated_completion: float | None = Field(None, ge=0.0, le=1.0)  # 0-1 progress estimate
-
-
-class TrainingFeedbackEvent(BaseEvent):
-	"""Event for collecting training feedback to improve future performance"""
-	id: str = Field(default_factory=uuid7str)
-	user_id: str = Field(max_length=255)
-	device_id: str | None = Field(None, max_length=255)
-	task_id: str
-	step_number: int | None = Field(None, ge=0)
-	timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-	
-	# Feedback details
-	feedback_type: str = Field(max_length=50)  # 'action_quality', 'reasoning_quality', 'goal_alignment'
-	rating: int = Field(ge=1, le=5)  # 1-5 star rating
-	comment: str | None = Field(None, max_length=MAX_COMMENT_LENGTH)
-	
-	# Context
-	original_action: Dict[str, Any] | None = None
-	suggested_action: Dict[str, Any] | None = None
-	original_reasoning: str | None = None
-	suggested_reasoning: str | None = None
-	
-	# Training metadata
-	tags: List[str] | None = None  # For categorizing feedback
-	is_example: bool = False  # Whether this is a good example to learn from
-	weight: float = Field(default=1.0, ge=0.0, le=10.0)  # Importance weight for training
+	browser_session_stopped: bool | None = None
+	browser_session_stopped_at: datetime | None = None
+	end_reason: str | None = Field(None, max_length=100)  # Why the session ended

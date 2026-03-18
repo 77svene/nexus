@@ -1,11 +1,16 @@
-blank_issues_enabled: false  # Set to true if you want to allow blank issues
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
+blank_issues_enabled: true
 contact_links:
-  - name: 🔢 Quickstart Guide
-    url: https://docs.nexus.com/quickstart
-    about: Most common issues can be resolved by following our quickstart guide
-  - name: 💬 Questions and Help
-    url: https://link.nexus.com/discord
-    about: Please ask questions in our Discord community
-  - name: 📖 Documentation
-    url: https://docs.nexus.com
-    about: Check our documentation for answers first
+  - name: 📘 YOLOv5 Docs
+    url: https://docs.ultralytics.com/nexus/
+    about: Complete Ultralytics YOLOv5 documentation
+  - name: 💬 Forum
+    url: https://community.ultralytics.com/
+    about: Ask the Ultralytics community for workflow help
+  - name: 🎧 Discord
+    url: https://ultralytics.com/discord
+    about: Chat with the Ultralytics team and other builders
+  - name: ⌨️ Reddit
+    url: https://reddit.com/r/ultralytics
+    about: Discuss Ultralytics projects on Reddit

@@ -1,0 +1,19 @@
+[Unit]
+Description=Quebec Business Opportunity Scanner
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/home/user/nexus/quebec_scanner
+ExecStart=/usr/bin/python3 /home/user/nexus/quebec_scanner/main.py
+Restart=always
+RestartSec=60
+Environment=PYTHONUNBUFFERED=1
+# Set your Telegram credentials here:
+# Environment=TELEGRAM_BOT_TOKEN=your_token_here
+# Environment=TELEGRAM_CHAT_ID=your_chat_id_here
+
+[Install]
+WantedBy=multi-user.target

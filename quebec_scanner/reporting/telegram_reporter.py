@@ -221,11 +221,35 @@ class TelegramReporter:
 
     def send_startup_message(self) -> bool:
         """Send a message when the scanner starts."""
-        msg = ("🍁 <b>QUÉBEC SCANNER - Démarré</b>\n\n"
-               "Le scanner autonome est maintenant actif.\n"
+        msg = ("🍁 <b>QUÉBEC SCANNER v2.0 - Démarré</b>\n\n"
+               "Scanner omniscient maintenant actif.\n"
+               "• 104 MRCs | 20+ sources de données\n"
+               "• Prédiction temporelle + analyse de cascade\n"
                "• Analyse toutes les 6 heures\n"
                "• Alertes pour score ≥ 7.0\n"
                f"\n{datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        return self._send_message_sync(msg)
+
+    def send_forecast_alert(self, mrc: str, peaks: list) -> bool:
+        """Send seasonal forecast alert."""
+        if not peaks:
+            return False
+        msg = f"🍁 <b>PRÉVISION SAISONNIÈRE - {mrc}</b>\n\n"
+        for p in peaks[:5]:
+            msg += (f"📈 <b>{p['category']}</b>: +{p['increase_pct']}% "
+                    f"dans {p['months_away']} mois\n"
+                    f"   {p['action']}\n\n")
+        msg += f"─────────────────────────\n{datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        return self._send_message_sync(msg)
+
+    def send_synthesis_alert(self, insights: list) -> bool:
+        """Send cross-domain synthesis insights."""
+        if not insights:
+            return False
+        msg = "🍁 <b>ANALYSE CROISÉE - Insights</b>\n\n"
+        for i, insight in enumerate(insights[:5], 1):
+            msg += f"{i}. {insight.get('description', str(insight))}\n\n"
+        msg += f"─────────────────────────\n{datetime.now().strftime('%Y-%m-%d %H:%M')}"
         return self._send_message_sync(msg)
 
     def send_new_alerts(self) -> int:

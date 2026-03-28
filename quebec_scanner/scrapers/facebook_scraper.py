@@ -75,29 +75,16 @@ class FacebookScraper(BaseScraper):
 
         for search_term in searches:
             query = f"site:facebook.com {search_term}"
-            params = {
-                "q": query,
-                "num": 20,
-                "hl": "fr",
-                "tbs": "qdr:m",  # Last month only
-            }
 
             try:
-                soup = self.fetch("https://www.google.com/search", params=params)
-                if not soup:
+                search_results = self.web_search(query, max_results=20)
+                if not search_results:
                     continue
 
-                for result in soup.select("div.g"):
-                    title_el = result.select_one("h3")
-                    if not title_el:
-                        continue
-
-                    title = title_el.get_text(strip=True)
-                    link_el = result.select_one("a[href]")
-                    url = link_el.get("href", "") if link_el else ""
-
-                    snippet_el = result.select_one("div.VwiC3b, span.aCOpRe")
-                    snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+                for result in search_results:
+                    title = result.get("title", "")
+                    url = result.get("url", "")
+                    snippet = result.get("snippet", "")
 
                     full_text = f"{title} {snippet}"
 

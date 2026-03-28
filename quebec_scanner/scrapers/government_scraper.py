@@ -97,20 +97,13 @@ class GovernmentScraper(BaseScraper):
         ]
 
         for query in search_queries:
-            soup = self.fetch("https://www.google.com/search", params={
-                "q": query, "num": 10, "hl": "fr", "tbs": "qdr:m",  # Last month
-            })
-            if not soup:
+            search_results = self.web_search_recent(query, max_results=10)
+            if not search_results:
                 continue
 
-            for result in soup.select("div.g"):
-                title_el = result.select_one("h3")
-                link_el = result.select_one("a[href]")
-                if not title_el or not link_el:
-                    continue
-
-                title = title_el.get_text(strip=True)
-                url = link_el.get("href", "")
+            for result in search_results:
+                title = result.get("title", "")
+                url = result.get("url", "")
 
                 # Classify which sector this program might affect
                 title_lower = title.lower()

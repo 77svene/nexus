@@ -1,11 +1,14 @@
 """
 Base scraper with common functionality: rate limiting, retries, logging.
+Includes DuckDuckGo web search as primary search engine (Google blocked in many envs).
 """
 
 import logging
 import random
+import re
 import time
 import requests
+from urllib.parse import unquote, urlparse, parse_qs
 from bs4 import BeautifulSoup
 
 import sys
@@ -16,6 +19,8 @@ from config import (
 )
 
 logger = logging.getLogger(__name__)
+
+DDG_URL = "https://html.duckduckgo.com/html/"
 
 
 class BaseScraper:
@@ -89,6 +94,99 @@ class BaseScraper:
                 time.sleep(2 ** attempt)
 
         return None
+
+    def web_search(self, query: str, max_results: int = 20) -> list:
+        """
+        Search the web using DuckDuckGo HTML API (works without JS, no API key).
+        Returns list of dicts: [{"title": str, "url": str, "snippet": str}, ...]
+        """
+        results = []
+        for attempt in range(MAX_RETRIES):
+            self._rate_limit()
+            try:
+                resp = self.session.post(DDG_URL, data={"q": query, "b": ""},
+                                         timeout=REQUEST_TIMEOUT)
+                if resp.status_code == 200:
+                    break
+                elif resp.status_code in (202, 429):
+                    # Rate limited - back off and retry
+                    wait = (attempt + 1) * 5
+                    logger.debug(f"[{self.name}] DDG rate limited, waiting {wait}s...")
+                    time.sleep(wait)
+                    continue
+                else:
+                    logger.warning(f"[{self.name}] DDG search HTTP {resp.status_code}")
+                    return results
+            except requests.exceptions.Timeout:
+                logger.warning(f"[{self.name}] DDG timeout (attempt {attempt + 1})")
+                time.sleep(2 ** attempt)
+                continue
+            except Exception as e:
+                logger.error(f"[{self.name}] DDG error: {e}")
+                return results
+        else:
+            logger.warning(f"[{self.name}] DDG search failed after {MAX_RETRIES} retries")
+            return results
+
+        try:
+            soup = BeautifulSoup(resp.text, "lxml")
+
+            for result_div in soup.select("div.result"):
+                title_el = result_div.select_one("a.result__a")
+                snippet_el = result_div.select_one("a.result__snippet")
+
+                if not title_el:
+                    continue
+
+                title = title_el.get_text(strip=True)
+                raw_url = title_el.get("href", "")
+
+                # DDG wraps URLs in a redirect - extract the real URL
+                url = self._extract_ddg_url(raw_url)
+
+                snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+
+                if title:
+                    results.append({
+                        "title": title,
+                        "url": url,
+                        "snippet": snippet,
+                    })
+
+                if len(results) >= max_results:
+                    break
+
+        except requests.exceptions.Timeout:
+            logger.warning(f"[{self.name}] DDG search timeout")
+        except Exception as e:
+            logger.error(f"[{self.name}] DDG search error: {e}")
+
+        return results
+
+    def _extract_ddg_url(self, raw_url: str) -> str:
+        """Extract the real URL from a DuckDuckGo redirect link."""
+        if "uddg=" in raw_url:
+            try:
+                parsed = urlparse(raw_url)
+                qs = parse_qs(parsed.query)
+                if "uddg" in qs:
+                    return unquote(qs["uddg"][0])
+            except Exception:
+                pass
+        if raw_url.startswith("//"):
+            return "https:" + raw_url
+        return raw_url
+
+    def web_search_site(self, site: str, query: str, max_results: int = 15) -> list:
+        """Search within a specific site using DDG."""
+        return self.web_search(f"site:{site} {query}", max_results)
+
+    def web_search_recent(self, query: str, max_results: int = 15) -> list:
+        """Search with date bias towards recent results."""
+        # DDG doesn't have a direct date filter in HTML API, but we add year
+        from datetime import datetime
+        year = datetime.now().year
+        return self.web_search(f"{query} {year}", max_results)
 
     def log_result(self, mrc, status, records_found=0, error_message="", duration=0.0):
         """Log scrape result to database."""

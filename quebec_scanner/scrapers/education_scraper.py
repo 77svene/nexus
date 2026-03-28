@@ -44,9 +44,7 @@ class EducationScraper(BaseScraper):
 
         search_term = programs[0]
         query = f"DEP {search_term} {region} Québec inscription"
-        soup = self.fetch("https://www.google.com/search", params={
-            "q": query, "num": 10, "hl": "fr",
-        })
+        search_results = self.web_search(query, max_results=10)
 
         result = {
             "available": False,
@@ -55,15 +53,16 @@ class EducationScraper(BaseScraper):
             "wait_list_signal": False,
         }
 
-        if not soup:
+        if not search_results:
             return result
 
-        results = soup.select("div.g")
-        result["schools_found"] = len(results)
-        result["available"] = len(results) > 0
+        result["schools_found"] = len(search_results)
+        result["available"] = len(search_results) > 0
 
         # Check for waitlist/capacity signals
-        text = soup.get_text(separator=" ", strip=True).lower()
+        text = " ".join(
+            f"{r.get('title', '')} {r.get('snippet', '')}" for r in search_results
+        ).lower()
         if any(w in text for w in ["liste d'attente", "complet", "places limitées"]):
             result["wait_list_signal"] = True
 

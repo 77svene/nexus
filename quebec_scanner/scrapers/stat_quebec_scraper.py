@@ -25,16 +25,17 @@ class StatQuebecScraper(BaseScraper):
     def get_demographics(self, mrc: str) -> dict:
         """Get demographic data for an MRC."""
         query = f"site:statistique.quebec.ca population {mrc}"
-        soup = self.fetch("https://www.google.com/search", params={
-            "q": query, "num": 10, "hl": "fr",
-        })
+        search_results = self.web_search(query, max_results=10)
 
         data = {"population": 0, "median_age": 0, "seniors_pct": 0, "growth_rate": 0}
 
-        if not soup:
+        if not search_results:
             return data
 
-        text = soup.get_text(separator=" ", strip=True).lower()
+        # Combine all titles and snippets for text analysis
+        text = " ".join(
+            f"{r.get('title', '')} {r.get('snippet', '')}" for r in search_results
+        ).lower()
 
         # Extract population numbers
         pop_match = re.search(r'population.*?(\d[\d\s]{2,}\d)', text)
@@ -66,16 +67,16 @@ class StatQuebecScraper(BaseScraper):
     def get_economic_indicators(self, mrc: str) -> dict:
         """Get economic indicators for an MRC."""
         query = f"site:statistique.quebec.ca économie emploi {mrc}"
-        soup = self.fetch("https://www.google.com/search", params={
-            "q": query, "num": 10, "hl": "fr",
-        })
+        search_results = self.web_search(query, max_results=10)
 
         data = {"unemployment_rate": 0, "business_count": 0, "avg_income": 0}
 
-        if not soup:
+        if not search_results:
             return data
 
-        text = soup.get_text(separator=" ", strip=True).lower()
+        text = " ".join(
+            f"{r.get('title', '')} {r.get('snippet', '')}" for r in search_results
+        ).lower()
 
         # Extract unemployment rate
         unemp_match = re.search(r'(?:chômage|taux d.emploi).*?(\d{1,2}[.,]\d)\s*%', text)
@@ -98,16 +99,16 @@ class StatQuebecScraper(BaseScraper):
     def get_building_permit_trends(self, mrc: str) -> dict:
         """Get building permit value trends."""
         query = f"statistique quebec permis bâtir {mrc} 2025 2026"
-        soup = self.fetch("https://www.google.com/search", params={
-            "q": query, "num": 10, "hl": "fr",
-        })
+        search_results = self.web_search(query, max_results=10)
 
         data = {"permit_value_trend": "unknown", "permit_mentions": 0}
 
-        if not soup:
+        if not search_results:
             return data
 
-        text = soup.get_text(separator=" ", strip=True).lower()
+        text = " ".join(
+            f"{r.get('title', '')} {r.get('snippet', '')}" for r in search_results
+        ).lower()
 
         # Count permit-related mentions
         data["permit_mentions"] = text.count("permis")

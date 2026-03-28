@@ -48,23 +48,15 @@ class EmploiQuebecScraper(BaseScraper):
         for term in terms[:2]:
             # Search Indeed Quebec (free, no API)
             query = f"site:indeed.com {term} {mrc} Québec"
-            soup = self.fetch("https://www.google.com/search", params={
-                "q": query, "num": 20, "hl": "fr",
-            })
-
-            if soup:
-                results = soup.select("div.g")
-                total_postings += len(results)
+            search_results = self.web_search(query, max_results=20)
+            if search_results:
+                total_postings += len(search_results)
 
             # Also search Jobillico
             query2 = f"site:jobillico.com {term} {mrc}"
-            soup2 = self.fetch("https://www.google.com/search", params={
-                "q": query2, "num": 10, "hl": "fr",
-            })
-
-            if soup2:
-                results2 = soup2.select("div.g")
-                total_postings += len(results2)
+            search_results2 = self.web_search(query2, max_results=10)
+            if search_results2:
+                total_postings += len(search_results2)
 
         # Many job postings = labor shortage = opportunity for independent providers
         shortage_level = "none"

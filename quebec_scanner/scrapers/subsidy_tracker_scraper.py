@@ -52,9 +52,8 @@ class SubsidyTrackerScraper(BaseScraper):
 
     def check_program(self, program: dict) -> dict:
         """Check status and details of a single subsidy program."""
-        soup = self.fetch("https://www.google.com/search", params={
-            "q": f"{program['search']} 2026", "num": 5, "hl": "fr",
-        })
+        query = f"{program['search']} 2026"
+        search_results = self.web_search(query, max_results=5)
 
         result = {
             "name": program["name"],
@@ -66,10 +65,12 @@ class SubsidyTrackerScraper(BaseScraper):
             "budget_signal": "unknown",
         }
 
-        if not soup:
+        if not search_results:
             return result
 
-        text = soup.get_text(separator=" ", strip=True).lower()
+        text = " ".join(
+            f"{r.get('title', '')} {r.get('snippet', '')}" for r in search_results
+        ).lower()
 
         # Check if program is still active
         inactive_words = ["terminé", "expiré", "fermé", "suspendu", "annulé"]

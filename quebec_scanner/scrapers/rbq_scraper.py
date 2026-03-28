@@ -15,7 +15,6 @@ from scrapers.base_scraper import BaseScraper
 
 logger = logging.getLogger(__name__)
 
-# RBQ license categories relevant to our business categories
 RBQ_CATEGORIES = {
     "construction": ["entrepreneur général", "1.1"],
     "plomberie": ["plomberie", "4.1"],
@@ -27,59 +26,41 @@ RBQ_CATEGORIES = {
 
 
 class RBQScraper(BaseScraper):
-    """Scrapes RBQ for licensed contractor data."""
-
     def __init__(self, knowledge_base=None):
         super().__init__("rbq", knowledge_base)
 
     def search_licensed_contractors(self, category: str, mrc: str) -> int:
-        """Search for RBQ-licensed contractors in a category and MRC."""
         rbq_terms = RBQ_CATEGORIES.get(category)
         if not rbq_terms:
             return 0
 
         total = 0
-        for term in rbq_terms[:1]:  # Use first term to limit requests
+        for term in rbq_terms[:1]:
             query = f"site:rbq.gouv.qc.ca {term} {mrc}"
-            params = {"q": query, "num": 20, "hl": "fr"}
+            results = self.web_search(query, max_results=20)
+            if not results:
+                continue
 
-            try:
-                soup = self.fetch("https://www.google.com/search", params=params)
-                if not soup:
-                    continue
+            for r in results:
+                title = r.get("title", "")
+                url = r.get("url", "")
 
-                results = soup.select("div.g")
-                for result in results:
-                    title_el = result.select_one("h3")
-                    if not title_el:
-                        continue
-                    title = title_el.get_text(strip=True)
+                license_match = re.search(r'\b(\d{4}-\d{4}-\d{2})\b', title)
+                license_num = license_match.group(1) if license_match else ""
+                biz_name = title.split(" - ")[0].strip() if " - " in title else title
 
-                    # Extract license numbers
-                    license_match = re.search(r'\b(\d{4}-\d{4}-\d{2})\b', title)
-                    license_num = license_match.group(1) if license_match else ""
-
-                    biz_name = title.split(" - ")[0].strip() if " - " in title else title
-
-                    if self.kb:
-                        self.kb.add_supply_provider(
-                            source="rbq",
-                            mrc=mrc,
-                            category=category,
-                            business_name=biz_name,
-                            license_number=license_num,
-                            license_type=term,
-                        )
-                        total += 1
-
-            except Exception as e:
-                logger.error(f"[rbq] Error searching {category} in {mrc}: {e}")
+                if self.kb:
+                    self.kb.add_supply_provider(
+                        source="rbq", mrc=mrc, category=category,
+                        business_name=biz_name, license_number=license_num,
+                        license_type=term,
+                    )
+                    total += 1
 
         self.log_result(mrc, "success", total)
         return total
 
     def scan_mrc(self, mrc: str) -> dict:
-        """Scan an MRC for all RBQ-relevant categories."""
         results = {}
         for category in RBQ_CATEGORIES:
             count = self.search_licensed_contractors(category, mrc)

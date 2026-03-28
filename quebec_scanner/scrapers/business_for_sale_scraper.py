@@ -36,22 +36,14 @@ class BusinessForSaleScraper(BaseScraper):
         ]
 
         for query in queries[:3]:  # Limit requests
-            soup = self.fetch("https://www.google.com/search", params={
-                "q": query, "num": 15, "hl": "fr",
-            })
-            if not soup:
+            search_results = self.web_search(query, max_results=15)
+            if not search_results:
                 continue
 
-            for result in soup.select("div.g"):
-                title_el = result.select_one("h3")
-                if not title_el:
-                    continue
-
-                title = title_el.get_text(strip=True)
-                snippet_el = result.select_one("div.VwiC3b, span.aCOpRe")
-                snippet = snippet_el.get_text(strip=True) if snippet_el else ""
-                link_el = result.select_one("a[href]")
-                url = link_el.get("href", "") if link_el else ""
+            for result in search_results:
+                title = result.get("title", "")
+                snippet = result.get("snippet", "")
+                url = result.get("url", "")
 
                 full_text = f"{title} {snippet}".lower()
 

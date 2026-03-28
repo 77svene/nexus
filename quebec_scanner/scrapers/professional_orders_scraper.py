@@ -54,15 +54,14 @@ class ProfessionalOrdersScraper(BaseScraper):
         total = 0
         for term in order_info["search_terms"][:1]:
             query = f"site:{order_info['url']} {term} {mrc}"
-            soup = self.fetch("https://www.google.com/search", params={
-                "q": query, "num": 20, "hl": "fr",
-            })
-            if soup:
-                results = soup.select("div.g")
-                total += len(results)
+            search_results = self.web_search(query, max_results=20)
+            if search_results:
+                total += len(search_results)
 
                 # Also try to extract actual member counts from text
-                text = soup.get_text(separator=" ", strip=True)
+                text = " ".join(
+                    f"{r.get('title', '')} {r.get('snippet', '')}" for r in search_results
+                )
                 count_match = re.search(r'(\d+)\s*(?:membres?|member)', text, re.I)
                 if count_match:
                     parsed = int(count_match.group(1))

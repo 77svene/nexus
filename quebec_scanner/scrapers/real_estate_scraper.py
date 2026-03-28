@@ -40,15 +40,14 @@ class RealEstateScraper(BaseScraper):
 
         total_listings = 0
         for query in queries:
-            soup = self.fetch("https://www.google.com/search", params={
-                "q": query, "num": 20, "hl": "fr",
-            })
-            if soup:
-                results = soup.select("div.g")
-                total_listings += len(results)
+            search_results = self.web_search(query, max_results=20)
+            if search_results:
+                total_listings += len(search_results)
 
-                # Extract price/trend signals from snippets
-                text = soup.get_text(separator=" ", strip=True).lower()
+                # Extract price/trend signals from titles and snippets
+                text = " ".join(
+                    f"{r.get('title', '')} {r.get('snippet', '')}" for r in search_results
+                ).lower()
 
                 # Market trend detection
                 hot_keywords = ["marché vendeur", "surenchère", "hausse prix", "forte demande"]

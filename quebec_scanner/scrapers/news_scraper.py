@@ -71,32 +71,15 @@ class NewsScraper(BaseScraper):
         for signal_type, signal_data in SIGNAL_KEYWORDS.items():
             for keyword in signal_data["fr"][:2]:  # Limit to 2 keywords per signal type
                 query = f"{keyword} {mrc} Québec"
-                params = {
-                    "q": query,
-                    "num": 10,
-                    "hl": "fr",
-                    "tbs": f"qdr:m{min(days_back // 30, 3)}",  # Last N months
-                    "tbm": "nws",  # News search
-                }
 
-                soup = self.fetch("https://www.google.com/search", params=params)
-                if not soup:
+                search_results = self.web_search_recent(query, max_results=10)
+                if not search_results:
                     continue
 
-                for result in soup.select("div.SoaBEf, div.g"):
-                    title_el = result.select_one("div.mCBkyc, h3")
-                    if not title_el:
-                        continue
-
-                    title = title_el.get_text(strip=True)
-                    link_el = result.select_one("a[href]")
-                    url = link_el.get("href", "") if link_el else ""
-
-                    snippet_el = result.select_one("div.GI74Re, div.VwiC3b")
-                    snippet = snippet_el.get_text(strip=True) if snippet_el else ""
-
-                    date_el = result.select_one("span.WG9SHc, div.OSrXXb span")
-                    date_text = date_el.get_text(strip=True) if date_el else ""
+                for result in search_results:
+                    title = result.get("title", "")
+                    url = result.get("url", "")
+                    snippet = result.get("snippet", "")
 
                     # Determine affected categories
                     full_text = f"{title} {snippet}".lower()
@@ -113,7 +96,7 @@ class NewsScraper(BaseScraper):
                         "title": title,
                         "snippet": snippet[:500],
                         "url": url,
-                        "date": date_text,
+                        "date": "",
                         "mrc": mrc,
                         "affected_categories": affected_categories,
                         "keyword_matched": keyword,

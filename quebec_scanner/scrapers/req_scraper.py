@@ -28,38 +28,33 @@ class REQScraper(BaseScraper):
     def search_businesses(self, category: str, mrc: str, max_results: int = 50) -> int:
         """
         Search for registered businesses in a category within an MRC.
-        Since REQ's direct search is complex, we use Google to search the registry.
+        Since REQ's direct search is complex, we use web search to search the registry.
         Returns count of found businesses.
         """
         cat_data = BUSINESS_CATEGORIES.get(category, {})
         keywords = cat_data.get("keywords_fr", [category])
         search_term = keywords[0] if keywords else category
 
-        # Search Google for REQ entries
+        # Search for REQ entries via web search
         query = f"site:registreentreprises.gouv.qc.ca {search_term} {mrc}"
-        params = {"q": query, "num": 50, "hl": "fr"}
 
         start_time = time.time()
-        soup = self.fetch("https://www.google.com/search", params=params)
+        search_results = self.web_search(query, max_results=max_results)
         duration = time.time() - start_time
 
-        if not soup:
+        if not search_results:
             self.log_result(mrc, "error", 0, "Failed to fetch", duration)
             return 0
 
-        # Count results
-        results = soup.select("div.g")
         businesses = []
 
-        for result in results:
-            title_el = result.select_one("h3")
-            if not title_el:
-                continue
-            title = title_el.get_text(strip=True)
+        for result in search_results:
+            title = result.get("title", "")
+            url = result.get("url", "")
 
             # Extract business name (REQ results typically show business name)
             # Filter out non-business results
-            if "registreentreprises" in str(result.select_one("a[href]") or ""):
+            if "registreentreprises" in url:
                 biz_name = title.split(" - ")[0].strip() if " - " in title else title
                 businesses.append(biz_name)
 
@@ -82,21 +77,13 @@ class REQScraper(BaseScraper):
         keywords = cat_data.get("keywords_fr", [category])
         search_term = keywords[0] if keywords else category
 
-        # Search with date restriction for recent registrations
+        # Search for recent registrations via web search
         query = f"site:registreentreprises.gouv.qc.ca {search_term} {mrc}"
-        params = {
-            "q": query,
-            "num": 20,
-            "hl": "fr",
-            "tbs": "qdr:m3",  # Last 3 months
-        }
-
-        soup = self.fetch("https://www.google.com/search", params=params)
-        if not soup:
+        search_results = self.web_search_recent(query, max_results=20)
+        if not search_results:
             return 0
 
-        results = soup.select("div.g")
-        return len(results)
+        return len(search_results)
 
     def scan_mrc(self, mrc: str, categories: list = None) -> dict:
         """Scan an MRC for all business categories."""

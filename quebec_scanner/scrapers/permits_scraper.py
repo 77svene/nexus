@@ -34,13 +34,13 @@ class PermitsScraper(BaseScraper):
 
         for query in queries:
             try:
-                soup = self.fetch("https://www.google.com/search", params={
-                    "q": query, "num": 10, "hl": "fr",
-                })
-                if not soup:
+                search_results = self.web_search(query, max_results=10)
+                if not search_results:
                     continue
 
-                page_text = soup.get_text(separator=" ", strip=True).lower()
+                page_text = " ".join(
+                    f"{r.get('title', '')} {r.get('snippet', '')}" for r in search_results
+                ).lower()
 
                 # Count mentions of permits
                 permit_keywords = ["permis", "permit", "construction", "bâtir"]

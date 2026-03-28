@@ -25,9 +25,9 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "data", "opportunities.db")
 # ─── Scraping Configuration ───
 SCRAPE_INTERVAL_HOURS = 6
 REQUEST_TIMEOUT = 30
-REQUEST_DELAY_MIN = 2.0  # seconds between requests (respectful scraping)
-REQUEST_DELAY_MAX = 5.0
-MAX_RETRIES = 3
+REQUEST_DELAY_MIN = 3.0  # seconds between requests (DDG rate limits at ~1req/2s)
+REQUEST_DELAY_MAX = 6.0
+MAX_RETRIES = 4
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "

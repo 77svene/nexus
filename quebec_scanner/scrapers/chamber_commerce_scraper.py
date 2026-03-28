@@ -29,21 +29,15 @@ class ChamberCommerceScraper(BaseScraper):
         search_term = keywords[0]
 
         query = f"chambre commerce {mrc} {search_term} répertoire"
-        soup = self.fetch("https://www.google.com/search", params={
-            "q": query, "num": 15, "hl": "fr",
-        })
+        search_results = self.web_search(query, max_results=15)
 
-        if not soup:
+        if not search_results:
             return 0
 
-        results = soup.select("div.g")
         count = 0
 
-        for result in results:
-            title_el = result.select_one("h3")
-            if not title_el:
-                continue
-            title = title_el.get_text(strip=True)
+        for result in search_results:
+            title = result.get("title", "")
 
             # Filter for actual business listings (not generic pages)
             if any(kw.lower() in title.lower() for kw in keywords[:3]):
@@ -63,20 +57,14 @@ class ChamberCommerceScraper(BaseScraper):
         new_businesses = []
 
         query = f"nouvelle entreprise ouverture {mrc} Québec 2026"
-        soup = self.fetch("https://www.google.com/search", params={
-            "q": query, "num": 15, "hl": "fr", "tbs": "qdr:m3",
-        })
+        search_results = self.web_search_recent(query, max_results=15)
 
-        if not soup:
+        if not search_results:
             return new_businesses
 
-        for result in soup.select("div.g"):
-            title_el = result.select_one("h3")
-            if not title_el:
-                continue
-            title = title_el.get_text(strip=True)
-            snippet_el = result.select_one("div.VwiC3b")
-            snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+        for result in search_results:
+            title = result.get("title", "")
+            snippet = result.get("snippet", "")
 
             full_text = f"{title} {snippet}".lower()
 
